@@ -35,6 +35,12 @@ from dbgpt.agent.resource.base import AgentResource, ResourceType
 from dbgpt.agent.resource.manage import get_resource_manager
 from dbgpt.agent.resource.tool.base import tool
 from dbgpt.configs.model_config import SKILLS_DIR
+from dbgpt.core.interface.report_capture import get_current_artifact_sink
+
+from ..tools.code_interpreter import (
+    make_code_interpreter as make_shared_code_interpreter,
+)
+from ..tools.sql_query import make_sql_query as make_shared_sql_query
 
 CFG = Config()
 logger = logging.getLogger(__name__)
@@ -417,7 +423,7 @@ def make_react_tools(
         "generate charts, or perform calculations. "
         'Parameters: {{"code": "python code string"}}'
     )
-    async def code_interpreter(code: str) -> str:
+    async def legacy_code_interpreter(code: str) -> str:
         """Execute arbitrary Python code and return stdout/stderr.
 
         Runs in a subprocess using the project's Python interpreter,
@@ -1339,11 +1345,37 @@ def make_react_tools(
         ]
         return json.dumps({"chunks": chunks}, ensure_ascii=False)
 
+    # SQL/Python are semantic execution boundaries. Delegate them to the same
+    # implementations used by the main agent so capture, safety, truncation,
+    # and future fixes cannot diverge between parent and child agents.
+    shared_sql_query = make_shared_sql_query(
+        react_state,
+        database_connector,
+        max_output_chars=None,
+    )
+    shared_code_interpreter = make_shared_code_interpreter(
+        react_state,
+        max_output_chars=2_000,
+        legacy_truncation_notice=True,
+    )
+
+    @tool(
+        description="Execute Python code for data analysis and computation. "
+        "Supports pandas, numpy, matplotlib, json, os, etc. "
+        "Use this tool when you need to run Python code to process data, "
+        "generate charts, or perform calculations. "
+        'Parameters: {{"code": "python code string"}}'
+    )
+    async def code_interpreter(code: str) -> str:
+        if get_current_artifact_sink() is None:
+            return await legacy_code_interpreter(code=code)
+        return await shared_code_interpreter(code=code)
+
     return {
         "load_skill": load_skill,
         "load_tools": load_tools,
         "knowledge_retrieve": knowledge_retrieve,
-        "sql_query": sql_query,
+        "sql_query": shared_sql_query,
         "code_interpreter": code_interpreter,
         "shell_interpreter": shell_interpreter,
         "execute_skill_script_file": execute_skill_script_file,

@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from dbgpt.core.interface.report_capture import (
+    ArtifactCaptureContext,
+    InMemoryArtifactSink,
+    get_current_artifact_sink,
+)
 from dbgpt_app.openapi.api_v1 import agentic_data_api
 from dbgpt_app.openapi.api_v1.react_final import AgentFinalAnswer
 
@@ -45,6 +50,25 @@ def test_history_failure_does_not_drop_final_or_done(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_operation_binds_and_restores_turn_artifact_sink() -> None:
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+
+    async def operation() -> str:
+        assert get_current_artifact_sink() is sink
+        await asyncio.sleep(0)
+        assert get_current_artifact_sink() is sink
+        return "done"
+
+    assert get_current_artifact_sink() is None
+    result = await agentic_data_api._run_with_artifact_capture(sink, operation)
+
+    assert result == "done"
+    assert get_current_artifact_sink() is None
+
+
+@pytest.mark.asyncio
 async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None:
     task_started = asyncio.Event()
     task_finished = asyncio.Event()
@@ -57,8 +81,10 @@ async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None
         finally:
             task_finished.set()
 
-    async def _fake_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode
+    async def _fake_stream_impl(
+        dialogue, tool_mode="full", attachment_ctx=None, agent_task_holder=None
+    ):
+        del dialogue, tool_mode, attachment_ctx
         task = asyncio.create_task(_agent_work())
         created_tasks.append(task)
         agent_task_holder.append(task)
@@ -87,8 +113,10 @@ async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None
 async def test_runtime_failure_emits_structured_final_and_done(
     monkeypatch, caplog
 ) -> None:
-    async def _failing_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode, agent_task_holder
+    async def _failing_stream_impl(
+        dialogue, tool_mode="full", attachment_ctx=None, agent_task_holder=None
+    ):
+        del dialogue, tool_mode, attachment_ctx, agent_task_holder
         if False:
             yield ""
         raise RuntimeError("model stream failed")
@@ -119,9 +147,9 @@ async def test_runtime_failure_emits_structured_final_and_done(
 @pytest.mark.asyncio
 async def test_runtime_failure_does_not_duplicate_a_final_event(monkeypatch) -> None:
     async def _partially_failing_stream_impl(
-        dialogue, tool_mode="full", agent_task_holder=None
+        dialogue, tool_mode="full", attachment_ctx=None, agent_task_holder=None
     ):
-        del dialogue, tool_mode, agent_task_holder
+        del dialogue, tool_mode, attachment_ctx, agent_task_holder
         yield agentic_data_api._sse_event(
             AgentFinalAnswer(content="answer").to_sse_payload()
         )
@@ -157,8 +185,10 @@ async def test_response_disconnect_closes_stream_and_agent_task(monkeypatch) -> 
         finally:
             task_finished.set()
 
-    async def _fake_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode
+    async def _fake_stream_impl(
+        dialogue, tool_mode="full", attachment_ctx=None, agent_task_holder=None
+    ):
+        del dialogue, tool_mode, attachment_ctx
         task = asyncio.create_task(_agent_work())
         created_tasks.append(task)
         agent_task_holder.append(task)

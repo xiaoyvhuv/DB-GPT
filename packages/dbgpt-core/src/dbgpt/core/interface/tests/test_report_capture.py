@@ -2,7 +2,8 @@
 
 import asyncio
 import importlib
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -55,6 +56,53 @@ def test_capture_context_generates_correlated_unique_identifiers() -> None:
         "action": "sql_query",
     }
     assert second.step_id == "python-second-step-token"
+
+
+def test_tabular_summary_is_lossless_and_bounds_preview() -> None:
+    capture = _capture_module()
+    precise_time = datetime(2026, 8, 23, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    rows = [
+        [Decimal("1.2300"), precise_time, b"raw", float("nan")],
+        [Decimal("2.0"), precise_time, b"more", float("inf")],
+    ]
+
+    preview, complete_hash, row_count, truncated = capture.summarize_tabular_artifact(
+        ["decimal", "time", "bytes", "special"],
+        rows,
+        max_preview_rows=1,
+        max_preview_bytes=10_000,
+    )
+
+    assert row_count == 2
+    assert truncated
+    assert preview["rows"] == [
+        [
+            {"$decimal": "1.2300"},
+            {"$datetime": precise_time.isoformat()},
+            {"$bytes_base64": "cmF3"},
+            {"$number": "NaN"},
+        ]
+    ]
+    complete = {
+        "columns": ["decimal", "time", "bytes", "special"],
+        "rows": [
+            preview["rows"][0],
+            [
+                {"$decimal": "2.0"},
+                {"$datetime": precise_time.isoformat()},
+                {"$bytes_base64": "bW9yZQ=="},
+                {"$number": "Infinity"},
+            ],
+        ],
+    }
+    assert complete_hash == capture.sha256_json(complete)
+
+
+def test_text_hash_matches_utf8_hash_for_large_unicode_payload() -> None:
+    capture = _capture_module()
+    value = "证据-hash-" * 100_000
+
+    assert capture.sha256_text(value) == capture.sha256_bytes(value.encode("utf-8"))
 
 
 def test_bound_sink_restores_nested_context_and_isolates_async_tasks() -> None:

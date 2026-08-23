@@ -9,7 +9,18 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -33,6 +44,12 @@ from dbgpt.agent.skill.manage import get_skill_manager
 from dbgpt.component import ComponentType
 from dbgpt.configs.model_config import SKILLS_DIR, resolve_root_path
 from dbgpt.core import PromptTemplate
+from dbgpt.core.interface.report_capture import (
+    ArtifactCaptureContext,
+    ArtifactSink,
+    InMemoryArtifactSink,
+    bind_artifact_sink,
+)
 from dbgpt.model.cluster import WorkerManagerFactory
 from dbgpt.util.json_utils import parse_or_raise_error
 from dbgpt_app.openapi.api_view_model import (
@@ -70,6 +87,7 @@ if TYPE_CHECKING:
     from dbgpt.agent.resource.tool.base import BaseTool
 
 REACT_AGENT_MEMORY_CACHE: Dict[str, "GptsMemory"] = {}
+_CaptureResult = TypeVar("_CaptureResult")
 
 DEFAULT_SKILLS_DIR = SKILLS_DIR
 AUTO_DATA_MARKER_PATTERN = re.compile(
@@ -1076,6 +1094,15 @@ async def _cancel_and_await_agent_task(task: "asyncio.Task[Any]") -> None:
             logger.exception("ReAct agent task failed during stream cleanup")
 
 
+async def _run_with_artifact_capture(
+    sink: ArtifactSink,
+    operation: Callable[[], Awaitable[_CaptureResult]],
+) -> _CaptureResult:
+    """Run one agent operation with task-local artifact capture enabled."""
+    with bind_artifact_sink(sink):
+        return await operation()
+
+
 async def _react_agent_stream(
     dialogue: ConversationVo,
     tool_mode: str = "full",
@@ -1093,19 +1120,21 @@ async def _react_agent_stream(
         attachment_ctx: Pre-resolved attachment context for this turn (or
             ``None`` for pure-text / legacy ``file_path`` requests).
     """
+    inner_stream = _react_agent_stream_inner(dialogue, tool_mode, attachment_ctx)
     try:
-        async for event in _react_agent_stream_inner(
-            dialogue, tool_mode, attachment_ctx
-        ):
+        async for event in inner_stream:
             yield event
     finally:
-        if attachment_ctx is not None:
-            try:
-                attachment_ctx.close()
-            except Exception:
-                logger.warning(
-                    "Failed to close session attachment context", exc_info=True
-                )
+        try:
+            await inner_stream.aclose()
+        finally:
+            if attachment_ctx is not None:
+                try:
+                    attachment_ctx.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close session attachment context", exc_info=True
+                    )
 
 
 def _legacy_upload_base_dir() -> str:
@@ -2295,6 +2324,21 @@ print(json.dumps(summary, ensure_ascii=False))
 
     conv_id = dialogue.conv_uid or str(uuid.uuid4())
     react_state["conv_id"] = conv_id
+    artifact_sink: Optional[InMemoryArtifactSink] = None
+    try:
+        artifact_sink = InMemoryArtifactSink(
+            ArtifactCaptureContext(
+                conv_uid=conv_id,
+                run_id=f"turn-{uuid.uuid4().hex}",
+            )
+        )
+        # Kept in per-turn state for PR5a assembly after the agent task completes.
+        # It is never included in prompts, SSE events, or conversation history.
+        react_state["_report_artifact_sink"] = artifact_sink
+    except ValueError:
+        # Evidence capture is observational and must not break a legacy turn
+        # whose conversation identifier predates the persistence contract.
+        logger.warning("Report artifact capture disabled for this turn", exc_info=True)
     if attachment_ctx is not None:
         # Public manifests for runtime tools plus the internal primary
         # materialized path / files_json mapping (execution-only values —
@@ -2954,10 +2998,19 @@ Thought/Action/Action Input format shown above.
     )
 
     async def run_agent():
-        return await agent.generate_reply(
-            received_message=received,
-            sender=agent,
-            stream_callback=stream_callback,
+        if artifact_sink is None:
+            return await agent.generate_reply(
+                received_message=received,
+                sender=agent,
+                stream_callback=stream_callback,
+            )
+        return await _run_with_artifact_capture(
+            artifact_sink,
+            lambda: agent.generate_reply(
+                received_message=received,
+                sender=agent,
+                stream_callback=stream_callback,
+            ),
         )
 
     agent_task = asyncio.create_task(run_agent())

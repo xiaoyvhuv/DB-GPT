@@ -384,6 +384,24 @@ def test_schema_v2_preserves_failed_execution_without_a_result() -> None:
     assert restored.artifacts[0].result is None
 
 
+def test_schema_v2_preserves_failed_chart_without_fabricated_output() -> None:
+    artifact = ChartArtifact(
+        artifact_id="chart-failed",
+        execution=EXECUTION,
+        created_at=CREATED_AT,
+        status="failed",
+        duration_ms=3,
+        error="renderer unavailable",
+        chart_type="line",
+        output=None,
+    )
+
+    restored = ChartArtifact.model_validate_json(artifact.model_dump_json())
+
+    assert restored.status == "failed"
+    assert restored.output is None
+
+
 def test_schema_v2_requires_status_and_duration_for_every_artifact() -> None:
     payload = _valid_report_payload()
     payload["schema_version"] = 2

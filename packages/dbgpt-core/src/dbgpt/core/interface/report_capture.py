@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextvars
 import hashlib
 import json
@@ -10,8 +11,22 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Callable, Iterator, List, Optional, Protocol, runtime_checkable
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    runtime_checkable,
+)
 
 from pydantic import TypeAdapter
 
@@ -230,7 +245,101 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_text(value: str) -> str:
     """Hash UTF-8 text without platform-dependent newline conversion."""
-    return sha256_bytes(value.encode("utf-8"))
+    digest = hashlib.sha256()
+    for offset in range(0, len(value), 64 * 1024):
+        digest.update(value[offset : offset + 64 * 1024].encode("utf-8"))
+    return digest.hexdigest()
+
+
+def normalize_artifact_value(value: Any) -> Any:
+    """Normalize common execution values without ambiguous ``default=str``."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    value_type = type(value)
+    if value_type.__module__.startswith("pandas.") and value_type.__name__ in {
+        "NAType",
+        "NaTType",
+    }:
+        return None
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        if math.isnan(value):
+            return {"$number": "NaN"}
+        return {"$number": "Infinity" if value > 0 else "-Infinity"}
+    if isinstance(value, Decimal):
+        return {"$decimal": str(value)}
+    if isinstance(value, datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"$date": value.isoformat()}
+    if isinstance(value, time):
+        return {"$time": value.isoformat()}
+    if isinstance(value, uuid.UUID):
+        return {"$uuid": str(value)}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
+    if isinstance(value, Enum):
+        return normalize_artifact_value(value.value)
+    if isinstance(value, (list, tuple)):
+        return [normalize_artifact_value(item) for item in value]
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("artifact mappings require string keys")
+        return {key: normalize_artifact_value(item) for key, item in value.items()}
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        item = item_method()
+        if item is not value:
+            return normalize_artifact_value(item)
+    raise ValueError(f"unsupported artifact value: {type(value).__name__}")
+
+
+def summarize_tabular_artifact(
+    columns: Sequence[str],
+    rows: Iterable[Any],
+    *,
+    max_preview_rows: int,
+    max_preview_bytes: int,
+) -> Tuple[Dict[str, Any], str, int, bool]:
+    """Hash normalized rows incrementally and retain a bounded inline preview."""
+    normalized_columns = [str(column) for column in columns]
+
+    def canonical_bytes(item: Any) -> bytes:
+        return json.dumps(
+            item,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    digest = hashlib.sha256()
+    digest.update(b'{"columns":')
+    digest.update(canonical_bytes(normalized_columns))
+    digest.update(b',"rows":[')
+    preview_rows: List[Any] = []
+    preview_bytes = len(canonical_bytes({"columns": normalized_columns, "rows": []}))
+    row_count = 0
+    for row in rows:
+        normalized_row = normalize_artifact_value(row)
+        encoded_row = canonical_bytes(normalized_row)
+        if row_count:
+            digest.update(b",")
+        digest.update(encoded_row)
+        if (
+            len(preview_rows) < max_preview_rows
+            and preview_bytes + len(encoded_row) + 1 <= max_preview_bytes
+        ):
+            preview_rows.append(normalized_row)
+            preview_bytes += len(encoded_row) + 1
+        row_count += 1
+    digest.update(b"]}")
+    truncated = len(preview_rows) < row_count
+    preview: Dict[str, Any] = {"columns": normalized_columns, "rows": preview_rows}
+    if truncated:
+        preview.update({"complete_row_count": row_count, "truncated": True})
+    return preview, digest.hexdigest(), row_count, truncated
 
 
 def _validate_json_value(value: object, active_containers: set) -> None:
@@ -282,7 +391,9 @@ __all__ = [
     "InMemoryArtifactSink",
     "bind_artifact_sink",
     "get_current_artifact_sink",
+    "normalize_artifact_value",
     "sha256_bytes",
     "sha256_json",
     "sha256_text",
+    "summarize_tabular_artifact",
 ]

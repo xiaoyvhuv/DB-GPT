@@ -187,9 +187,15 @@ class ChartArtifact(BaseArtifact):
     type: Literal["chart"] = "chart"
     chart_type: str
     spec: Dict[str, Any] = Field(default_factory=dict)
-    output: ArtifactContent
+    output: Optional[ArtifactContent] = None
 
     _validate_chart_type = field_validator("chart_type")(_require_non_blank)
+
+    @model_validator(mode="after")
+    def validate_output(self) -> "ChartArtifact":
+        if self.status in {None, "succeeded"} and self.output is None:
+            raise ValueError("successful chart artifact requires output")
+        return self
 
 
 class ReferenceArtifact(BaseArtifact):
