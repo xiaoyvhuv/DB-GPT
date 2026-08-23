@@ -10,9 +10,16 @@ Verifies:
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from dbgpt.core.interface.report import ReferenceArtifact
+from dbgpt.core.interface.report_capture import (
+    ArtifactCaptureContext,
+    InMemoryArtifactSink,
+    bind_artifact_sink,
+)
 from dbgpt_app.openapi.api_v1.subagent.react_tools import make_react_tools
 
 _EXPECTED_TOOLS = {
@@ -114,3 +121,51 @@ async def test_knowledge_retrieve_degrades_when_no_resource():
     out = await tools["knowledge_retrieve"](query="q")
     parsed = json.loads(out)
     assert "No knowledge base available" in parsed["chunks"][0]["content"]
+
+
+class _KnowledgeResource:
+    async def retrieve(self, query):
+        return [
+            SimpleNamespace(
+                chunk_id="chunk-1",
+                chunk_name="Section",
+                content="Exact legacy content",
+                score=0.9,
+                metadata={"doc_name": "guide.md"},
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_knowledge_preserves_legacy_output_without_sink():
+    tools = make_react_tools(
+        {"conv_id": "c1"}, knowledge_resources=[_KnowledgeResource()]
+    )
+
+    parsed = json.loads(await tools["knowledge_retrieve"](query="guide"))
+
+    assert parsed == {
+        "chunks": [
+            {
+                "output_type": "text",
+                "content": "Retrieved 1 relevant documents",
+            },
+            {"output_type": "markdown", "content": "[1] Exact legacy content"},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_subagent_knowledge_uses_shared_capture_when_sink_is_bound():
+    tools = make_react_tools(
+        {"conv_id": "c1"}, knowledge_resources=[_KnowledgeResource()]
+    )
+    sink = InMemoryArtifactSink(ArtifactCaptureContext(conv_uid="c1", run_id="run-1"))
+
+    with bind_artifact_sink(sink):
+        parsed = json.loads(await tools["knowledge_retrieve"](query="guide"))
+
+    assert parsed["citations"][0]["id"] == "chunk-1"
+    artifact = sink.snapshot()[0]
+    assert isinstance(artifact, ReferenceArtifact)
+    assert artifact.source_id == "chunk-1"

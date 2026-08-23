@@ -2,9 +2,11 @@ import json
 import logging
 import random
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 import charset_normalizer
 import pandas as pd
@@ -12,6 +14,11 @@ import requests
 from bs4 import BeautifulSoup
 
 from dbgpt._private.pydantic import BaseModel, Field, model_to_dict
+from dbgpt.core.interface.report_capture import (
+    capture_reference_artifact,
+    get_current_artifact_sink,
+    sha256_text,
+)
 from dbgpt.vis.tags.vis_chart import VisChart
 
 from ...core.action.base import Action, ActionOutput
@@ -55,6 +62,13 @@ session.headers.update(
     }
 )
 
+_PAGE_FETCH_FAILURE_MESSAGES = {
+    "无法获取内容",
+    "无法提取内容",
+    "非HTML内容，无法提取",
+    "任务已中断，无法获取内容",
+}
+
 
 def clean_text(text):
     """清洗文本：移除控制字符、非打印字符，保留纯文本"""
@@ -71,7 +85,7 @@ def clean_text(text):
     return cleaned
 
 
-def get_page_content(url, worker=None):
+def _get_page_content(url, worker=None, provenance: Optional[Dict[str, Any]] = None):
     """
     获取指定URL页面的所有文本内容，处理编码并过滤非HTML内容，同时尽量保留原网页的文本格式。
     支持中断功能：使用流式下载数据，并在每个块读取时检测 worker 的中断标志。
@@ -92,6 +106,8 @@ def get_page_content(url, worker=None):
         logging.info(f"请求页面内容: {url}")
         # 使用 stream=True 以便分块读取数据
         response = requests.get(url, headers=headers, stream=True, timeout=10)
+        if provenance is not None:
+            provenance["final_url"] = str(response.url or url)
         response.raise_for_status()
 
         content_type = response.headers.get("Content-Type", "")
@@ -151,7 +167,39 @@ def get_page_content(url, worker=None):
     return extracted_text if extracted_text else "无法提取内容"
 
 
-def get_bing_search_results(query, num_results=5, worker=None):
+def get_page_content(url, worker=None, provenance: Optional[Dict[str, Any]] = None):
+    """Fetch one page and optionally record provenance at the request boundary."""
+    if provenance is None:
+        return _get_page_content(url, worker)
+
+    started_at = datetime.now(timezone.utc)
+    started = time.perf_counter()
+    provenance.update(
+        {
+            "requested_url": str(url),
+            "final_url": str(url),
+            "fetch_started_at": started_at.isoformat(),
+        }
+    )
+    try:
+        content = _get_page_content(url, worker, provenance)
+        provenance["fetch_status"] = (
+            "failed" if content in _PAGE_FETCH_FAILURE_MESSAGES else "succeeded"
+        )
+        return content
+    except Exception:
+        provenance["fetch_status"] = "failed"
+        raise
+    finally:
+        provenance["fetched_at"] = datetime.now(timezone.utc).isoformat()
+        provenance["fetch_duration_ms"] = max(
+            0, int((time.perf_counter() - started) * 1000)
+        )
+
+
+def get_bing_search_results(
+    query, num_results=5, worker=None, capture_metadata: bool = False
+):
     query_encoded = urllib.parse.quote_plus(query)
     url = f"https://www.bing.com/search?q={query_encoded}"
     logging.info(f"发送请求到Bing URL: {url}")
@@ -233,8 +281,11 @@ def get_bing_search_results(query, num_results=5, worker=None):
                 logging.info("抓取内容任务被中断。")
                 break
             # 提交任务获取内容
-            future = executor.submit(get_page_content, link_info["link"], worker)
-            future_to_link[future] = link_info
+            provenance: Optional[Dict[str, Any]] = {} if capture_metadata else None
+            future = executor.submit(
+                get_page_content, link_info["link"], worker, provenance
+            )
+            future_to_link[future] = (link_info, provenance)
 
         for future in as_completed(future_to_link):
             if worker and not worker.is_running:
@@ -244,19 +295,34 @@ def get_bing_search_results(query, num_results=5, worker=None):
                         fut.cancel()
                 break
 
-            link_info = future_to_link[future]
+            link_info, provenance = future_to_link[future]
             try:
                 # 补充内容信息
                 content = future.result()
-                results.append(
-                    {
-                        **link_info,  # 扩展已有的标题、链接、摘要
-                        "content": content,  # 新增内容字段
-                    }
-                )
+                result = {
+                    **link_info,  # 扩展已有的标题、链接、摘要
+                    "content": content,  # 新增内容字段
+                }
             except Exception as e:
                 logging.error(f"抓取内容时出错 ({link_info['link']}): {e}")
-                results.append({**link_info, "content": "无法获取内容"})
+                result = {**link_info, "content": "无法获取内容"}
+            if capture_metadata:
+                provenance = provenance or {}
+                result["_report_requested_url"] = provenance.get(
+                    "requested_url", link_info["link"]
+                )
+                result["_report_final_url"] = provenance.get(
+                    "final_url", link_info["link"]
+                )
+                result["_report_fetch_started_at"] = provenance.get("fetch_started_at")
+                result["_report_fetched_at"] = provenance.get("fetched_at")
+                result["_report_fetch_duration_ms"] = provenance.get(
+                    "fetch_duration_ms", 0
+                )
+                result["_report_fetch_status"] = provenance.get(
+                    "fetch_status", "failed"
+                )
+            results.append(result)
 
     return results
 
@@ -326,8 +392,67 @@ class WebSearchAction(Action[WebSearchInput]):
 
             data_df = pd.DataFrame()
             if is_need == "yes":
-                results = get_bing_search_results(keywords, num_results=3)
-                data_df = pd.DataFrame(results)
+                capture_enabled = get_current_artifact_sink() is not None
+                results = get_bing_search_results(
+                    keywords,
+                    num_results=3,
+                    capture_metadata=capture_enabled,
+                )
+                if capture_enabled:
+                    query_sha256 = sha256_text(keywords)
+                    for index, item in enumerate(results):
+                        requested_url = str(item.get("link") or "")
+                        if not requested_url:
+                            continue
+                        final_url = str(item.get("_report_final_url") or requested_url)
+                        fetched_content = str(item.get("content") or "")
+                        fetch_failed = (
+                            item.get("_report_fetch_status") == "failed"
+                            or fetched_content in _PAGE_FETCH_FAILURE_MESSAGES
+                        )
+                        snippet = str(item.get("snippet") or "")
+                        content = (
+                            snippet if fetch_failed else fetched_content or snippet
+                        )
+                        capture_reference_artifact(
+                            reference_type="web",
+                            source_id=f"web-{sha256_text(final_url)[:24]}",
+                            action="web_search.fetch",
+                            duration_ms=int(item.get("_report_fetch_duration_ms") or 0),
+                            status="failed" if fetch_failed else "succeeded",
+                            error="page fetch failed" if fetch_failed else None,
+                            source_name=item.get("title") or final_url,
+                            uri=final_url,
+                            locator={
+                                "requested_url": item.get(
+                                    "_report_requested_url", requested_url
+                                ),
+                                "final_url": final_url,
+                                "fetch_started_at": item.get(
+                                    "_report_fetch_started_at"
+                                ),
+                                "fetched_at": item.get("_report_fetched_at"),
+                                "result_index": index,
+                            },
+                            excerpt=content,
+                            metadata={
+                                "query_sha256": query_sha256,
+                                "content_sha256": sha256_text(content),
+                                "snippet_sha256": sha256_text(snippet),
+                                "fetch_status": (
+                                    "failed" if fetch_failed else "succeeded"
+                                ),
+                            },
+                        )
+                public_results = [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if not key.startswith("_report_")
+                    }
+                    for item in results
+                ]
+                data_df = pd.DataFrame(public_results)
 
             param_dict = model_to_dict(param)
             if not data_df.empty:

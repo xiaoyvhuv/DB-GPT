@@ -2,7 +2,9 @@
 
 import json
 import logging
+import math
 import os
+import time
 from abc import ABC
 from datetime import datetime
 from enum import Enum
@@ -12,6 +14,11 @@ from jinja2 import Environment, meta
 from jinja2.sandbox import SandboxedEnvironment
 
 from dbgpt._private.pydantic import BaseModel, ConfigDict, Field
+from dbgpt.core.interface.report_capture import (
+    capture_reference_artifact,
+    get_current_artifact_sink,
+    sha256_text,
+)
 
 from .action.base import ActionOutput
 from .memory.agent_memory import (
@@ -271,7 +278,47 @@ class Role(ABC, BaseModel):
         question: str,
     ) -> Union[str, List["AgentMessage"]]:
         """Read the memories from the memory."""
+        capture_enabled = get_current_artifact_sink() is not None
+        started = time.perf_counter() if capture_enabled else None
         memories = await self.memory.read(question)
+        duration_ms = (
+            max(0, int((time.perf_counter() - started) * 1000))
+            if started is not None
+            else 0
+        )
+        if capture_enabled:
+            query_sha256 = sha256_text(question)
+            for index, memory in enumerate(memories):
+                observation = memory.raw_observation
+                version = sha256_text(observation)
+                importance = memory.importance
+                score = (
+                    float(importance)
+                    if isinstance(importance, (int, float))
+                    and math.isfinite(float(importance))
+                    and importance >= 0
+                    else None
+                )
+                capture_reference_artifact(
+                    reference_type="memory",
+                    source_id=memory.id,
+                    action="memory.read",
+                    duration_ms=duration_ms,
+                    source_name=type(memory).__name__,
+                    locator={
+                        "memory_id": memory.id,
+                        "version": version,
+                        "result_index": index,
+                    },
+                    score=score,
+                    metadata={
+                        "query_sha256": query_sha256,
+                        "version_algorithm": "sha256",
+                        "content_persisted": False,
+                        "is_insight": memory.is_insight,
+                        "last_accessed_time": memory.last_accessed_time,
+                    },
+                )
         recent_messages = [m.raw_observation for m in memories]
         return "".join(recent_messages)
 

@@ -40,6 +40,9 @@ from dbgpt.core.interface.report_capture import get_current_artifact_sink
 from ..tools.code_interpreter import (
     make_code_interpreter as make_shared_code_interpreter,
 )
+from ..tools.knowledge_retrieve import (
+    make_knowledge_retrieve as make_shared_knowledge_retrieve,
+)
 from ..tools.sql_query import make_sql_query as make_shared_sql_query
 
 CFG = Config()
@@ -261,7 +264,7 @@ def make_react_tools(
         "Use this tool when the user question involves content that may be "
         'in the knowledge base. Parameters: {{"query": "search query"}}'
     )
-    async def knowledge_retrieve(query: str) -> str:
+    async def legacy_knowledge_retrieve(query: str) -> str:
         if not knowledge_resources:
             return json.dumps(
                 {
@@ -1358,6 +1361,19 @@ def make_react_tools(
         max_output_chars=2_000,
         legacy_truncation_notice=True,
     )
+    shared_knowledge_retrieve = make_shared_knowledge_retrieve(
+        react_state, knowledge_resources or []
+    )
+
+    @tool(
+        description="Retrieve relevant information from the knowledge base. "
+        "Use this tool when the user question involves content that may be "
+        'in the knowledge base. Parameters: {{"query": "search query"}}'
+    )
+    async def knowledge_retrieve(query: str) -> str:
+        if get_current_artifact_sink() is None:
+            return await legacy_knowledge_retrieve(query=query)
+        return await shared_knowledge_retrieve(query=query)
 
     @tool(
         description="Execute Python code for data analysis and computation. "

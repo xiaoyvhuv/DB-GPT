@@ -2,9 +2,15 @@
 
 import json
 import math
+import time
 from typing import Any, Dict, List
 
 from dbgpt.agent.resource.tool.base import tool
+from dbgpt.core.interface.report_capture import (
+    capture_reference_artifact,
+    get_current_artifact_sink,
+    sha256_text,
+)
 
 
 def make_knowledge_retrieve(react_state: Dict[str, Any], knowledge_resources: List):
@@ -32,7 +38,14 @@ def make_knowledge_retrieve(react_state: Dict[str, Any], knowledge_resources: Li
 
         resource = knowledge_resources[0]
         try:
+            capture_enabled = get_current_artifact_sink() is not None
+            started = time.perf_counter() if capture_enabled else None
             chunks = await resource.retrieve(query)
+            duration_ms = (
+                max(0, int((time.perf_counter() - started) * 1000))
+                if started is not None
+                else 0
+            )
             if chunks:
                 # Cap per-chunk and total size so a few large chunks can't
                 # overflow the LLM context window. Larger outputs are
@@ -89,6 +102,72 @@ def make_knowledge_retrieve(react_state: Dict[str, Any], knowledge_resources: Li
                             "url": str(url) if url else None,
                         }
                     )
+                    if capture_enabled:
+                        capture_metadata = metadata
+                        prop_field = metadata.get("prop_field")
+                        if isinstance(prop_field, dict):
+                            capture_metadata = {**prop_field, **metadata}
+                        capture_path = capture_metadata.get(
+                            "file_path"
+                        ) or capture_metadata.get("path")
+                        capture_source_name = (
+                            capture_metadata.get("doc_name")
+                            or capture_metadata.get("document_name")
+                            or capture_metadata.get("doc")
+                            or capture_metadata.get("source")
+                            or capture_path
+                            or getattr(chunk, "chunk_name", None)
+                            or "Knowledge Base"
+                        )
+                        capture_url = capture_metadata.get(
+                            "url"
+                        ) or capture_metadata.get("source_url")
+                        chunk_id = str(
+                            getattr(chunk, "chunk_id", None)
+                            or capture_metadata.get("chunk_id")
+                            or f"knowledge-{i + 1}"
+                        )
+                        document_id = (
+                            capture_metadata.get("document_id")
+                            or capture_metadata.get("doc_id")
+                            or capture_metadata.get("file_id")
+                        )
+                        page = capture_metadata.get("page")
+                        if page is None:
+                            page = capture_metadata.get("page_number")
+                        knowledge_id = capture_metadata.get(
+                            "space_id"
+                        ) or capture_metadata.get("knowledge_id")
+                        if knowledge_id is None:
+                            try:
+                                knowledge_id = getattr(
+                                    resource, "name", None
+                                ) or getattr(resource, "value", None)
+                            except Exception:
+                                knowledge_id = None
+                        kb_uri = (
+                            f"kb://{knowledge_id or 'unknown'}/"
+                            f"{document_id or 'unknown'}/{chunk_id}"
+                        )
+                        capture_reference_artifact(
+                            reference_type="knowledge",
+                            source_id=chunk_id,
+                            action="knowledge_retrieve",
+                            duration_ms=duration_ms,
+                            source_name=capture_source_name,
+                            uri=str(capture_url) if capture_url else kb_uri,
+                            locator={
+                                "knowledge_id": knowledge_id,
+                                "document_id": document_id,
+                                "chunk_id": chunk_id,
+                                "chunk_index": capture_metadata.get("chunk_index", i),
+                                "page": page,
+                                "path": (str(capture_path) if capture_path else None),
+                            },
+                            excerpt=chunk.content or "",
+                            score=finite_score,
+                            metadata={"query_sha256": sha256_text(query)},
+                        )
                 content = "\n".join(content_parts)
                 return json.dumps(
                     {

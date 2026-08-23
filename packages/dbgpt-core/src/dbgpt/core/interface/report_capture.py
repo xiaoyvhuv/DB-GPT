@@ -6,12 +6,14 @@ import base64
 import contextvars
 import hashlib
 import json
+import logging
 import math
+import re
 import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import (
@@ -21,12 +23,15 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Literal,
     Optional,
     Protocol,
     Sequence,
     Tuple,
+    cast,
     runtime_checkable,
 )
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import TypeAdapter
 
@@ -39,9 +44,55 @@ from .report import (
     MAX_TASK_ID_LENGTH,
     Artifact,
     ExecutionReference,
+    ReferenceArtifact,
 )
 
 _ARTIFACT_ADAPTER = TypeAdapter(Artifact)
+MAX_REFERENCE_EXCERPT_CHARS = 4_000
+logger = logging.getLogger(__name__)
+_SENSITIVE_QUERY_NAMES = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "code",
+    "credential",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "session",
+    "signature",
+    "sig",
+    "token",
+    "x-amz-credential",
+    "x-amz-signature",
+    "x-amz-security-token",
+    "x-goog-credential",
+    "x-goog-signature",
+}
+
+_SENSITIVE_QUERY_PARTS = {
+    "credential",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "signature",
+    "token",
+}
+_SENSITIVE_COMPACT_QUERY_NAMES = {
+    "apikey",
+    "accesskey",
+    "accesskeyid",
+    "awsaccesskeyid",
+    "clientsecret",
+    "idtoken",
+    "privatekey",
+    "refreshtoken",
+    "secretkey",
+}
 
 
 def _uuid_token() -> str:
@@ -238,16 +289,156 @@ def get_current_artifact_sink() -> Optional[ArtifactSink]:
     return _current_artifact_sink.get()
 
 
+def sanitize_reference_uri(value: str) -> str:
+    """Remove credentials from persisted HTTP(S) reference URLs."""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return value
+        hostname = parsed.hostname or ""
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        query = urlencode(
+            [
+                (name, "[REDACTED]" if _is_sensitive_query_name(name) else item)
+                for name, item in parse_qsl(parsed.query, keep_blank_values=True)
+            ],
+            doseq=True,
+        )
+        return urlunsplit((parsed.scheme, netloc, parsed.path, query, ""))
+    except Exception:
+        logger.warning("Unable to sanitize reference URI; omitting it", exc_info=True)
+        return ""
+
+
+def _is_sensitive_query_name(name: str) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+    if normalized in _SENSITIVE_QUERY_NAMES:
+        return True
+    parts = {part for part in re.split(r"[^a-z0-9]+", normalized) if part}
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    return bool(parts & _SENSITIVE_QUERY_PARTS) or compact in (
+        _SENSITIVE_COMPACT_QUERY_NAMES
+    )
+
+
+def capture_reference_artifact(
+    *,
+    reference_type: Literal["knowledge", "memory", "web", "model"],
+    source_id: object,
+    action: str,
+    duration_ms: int,
+    status: Literal["succeeded", "failed"] = "succeeded",
+    error: Optional[str] = None,
+    source_name: Optional[object] = None,
+    uri: Optional[object] = None,
+    locator: Optional[Dict[str, Any]] = None,
+    excerpt: Optional[str] = None,
+    excerpt_parts: Optional[Iterable[str]] = None,
+    excerpt_separator: str = "",
+    score: Optional[float] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Record a knowledge, memory, web, or model reference if capture is active."""
+    sink = get_current_artifact_sink()
+    if sink is None:
+        return None
+    try:
+        if excerpt is not None and excerpt_parts is not None:
+            raise ValueError("provide excerpt or excerpt_parts, not both")
+        excerpt_digest = hashlib.sha256()
+        preview_parts: List[str] = []
+        preview_chars = 0
+        excerpt_chars = 0
+        if excerpt_parts is not None:
+            for index, part in enumerate(excerpt_parts):
+                if index:
+                    _update_text_digest(excerpt_digest, excerpt_separator)
+                    excerpt_chars += len(excerpt_separator)
+                    remaining = MAX_REFERENCE_EXCERPT_CHARS - preview_chars
+                    if remaining > 0:
+                        preview_separator = excerpt_separator[:remaining]
+                        preview_parts.append(preview_separator)
+                        preview_chars += len(preview_separator)
+                text_part = str(part)
+                _update_text_digest(excerpt_digest, text_part)
+                excerpt_chars += len(text_part)
+                remaining = MAX_REFERENCE_EXCERPT_CHARS - preview_chars
+                if remaining > 0:
+                    preview_part = text_part[:remaining]
+                    preview_parts.append(preview_part)
+                    preview_chars += len(preview_part)
+            preview = "".join(preview_parts)
+        else:
+            complete_excerpt = excerpt or ""
+            _update_text_digest(excerpt_digest, complete_excerpt)
+            excerpt_chars = len(complete_excerpt)
+            preview = complete_excerpt[:MAX_REFERENCE_EXCERPT_CHARS]
+        summary = {
+            "excerpt_chars": excerpt_chars,
+            "excerpt_sha256": excerpt_digest.hexdigest(),
+            "excerpt_truncated": excerpt_chars > MAX_REFERENCE_EXCERPT_CHARS,
+        }
+        normalized_locator = cast(
+            Dict[str, Any], normalize_artifact_value(locator or {})
+        )
+        for key, value in normalized_locator.items():
+            if isinstance(value, str) and (key == "url" or key.endswith("_url")):
+                normalized_locator[key] = sanitize_reference_uri(value)
+        normalized_metadata = cast(
+            Dict[str, Any], normalize_artifact_value(metadata or {})
+        )
+        normalized_metadata["content_summary"] = summary
+        resolved_score = (
+            float(score)
+            if isinstance(score, (int, float))
+            and math.isfinite(float(score))
+            and score >= 0
+            else None
+        )
+        resolved_source_name = (
+            sanitize_reference_uri(str(source_name))
+            if source_name is not None
+            else None
+        )
+        resolved_uri = sanitize_reference_uri(str(uri)) if uri is not None else None
+        artifact = ReferenceArtifact(
+            artifact_id=sink.context.new_artifact_id("reference"),
+            execution=sink.context.execution_reference(action=action),
+            created_at=datetime.now(timezone.utc),
+            status=status,
+            duration_ms=max(0, duration_ms),
+            error=error[:MAX_REFERENCE_EXCERPT_CHARS] if error is not None else None,
+            reference_type=reference_type,
+            source_id=str(source_id) if source_id is not None else "",
+            source_name=resolved_source_name,
+            uri=resolved_uri or None,
+            locator=normalized_locator,
+            excerpt=preview or None,
+            score=resolved_score,
+            metadata=normalized_metadata,
+        )
+        sink.record(artifact)
+        return artifact.artifact_id
+    except Exception:
+        logger.warning("Unable to capture reference report artifact", exc_info=True)
+        return None
+
+
 def sha256_bytes(value: bytes) -> str:
     """Hash exact bytes using lowercase SHA-256 hex encoding."""
     return hashlib.sha256(value).hexdigest()
 
 
+def _update_text_digest(digest: Any, value: str) -> None:
+    for offset in range(0, len(value), 64 * 1024):
+        digest.update(value[offset : offset + 64 * 1024].encode("utf-8"))
+
+
 def sha256_text(value: str) -> str:
     """Hash UTF-8 text without platform-dependent newline conversion."""
     digest = hashlib.sha256()
-    for offset in range(0, len(value), 64 * 1024):
-        digest.update(value[offset : offset + 64 * 1024].encode("utf-8"))
+    _update_text_digest(digest, value)
     return digest.hexdigest()
 
 
@@ -388,10 +579,13 @@ def sha256_json(value: object) -> str:
 __all__ = [
     "ArtifactCaptureContext",
     "ArtifactSink",
+    "MAX_REFERENCE_EXCERPT_CHARS",
     "InMemoryArtifactSink",
     "bind_artifact_sink",
+    "capture_reference_artifact",
     "get_current_artifact_sink",
     "normalize_artifact_value",
+    "sanitize_reference_uri",
     "sha256_bytes",
     "sha256_json",
     "sha256_text",

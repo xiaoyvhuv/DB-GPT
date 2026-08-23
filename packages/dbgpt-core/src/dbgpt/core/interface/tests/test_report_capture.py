@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from dbgpt.core.interface.report import ArtifactContent, SQLArtifact
+from dbgpt.core.interface.report import ArtifactContent, ReferenceArtifact, SQLArtifact
 
 
 def _capture_module():
@@ -56,6 +56,163 @@ def test_capture_context_generates_correlated_unique_identifiers() -> None:
         "action": "sql_query",
     }
     assert second.step_id == "python-second-step-token"
+
+
+def test_reference_capture_is_bounded_and_keeps_complete_content_hash() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+    excerpt = "knowledge evidence" * 1_000
+
+    with capture.bind_artifact_sink(sink):
+        artifact_id = capture.capture_reference_artifact(
+            reference_type="knowledge",
+            source_id="chunk-7",
+            action="knowledge.retrieve",
+            duration_ms=12,
+            source_name="guide.pdf",
+            uri="kb://space-1/document-3/chunk-7",
+            locator={"space_id": 1, "document_id": 3, "chunk_id": 7, "page": 9},
+            excerpt=excerpt,
+            score=0.91,
+            metadata={"query_sha256": capture.sha256_text("report schema")},
+        )
+
+    artifact = sink.snapshot()[0]
+    assert artifact_id == artifact.artifact_id
+    assert isinstance(artifact, ReferenceArtifact)
+    assert artifact.reference_type == "knowledge"
+    assert artifact.locator == {
+        "space_id": 1,
+        "document_id": 3,
+        "chunk_id": 7,
+        "page": 9,
+    }
+    assert artifact.excerpt == excerpt[: capture.MAX_REFERENCE_EXCERPT_CHARS]
+    assert artifact.metadata["content_summary"] == {
+        "excerpt_chars": len(excerpt),
+        "excerpt_sha256": capture.sha256_text(excerpt),
+        "excerpt_truncated": True,
+    }
+
+
+def test_reference_capture_is_noop_without_bound_sink() -> None:
+    capture = _capture_module()
+
+    assert (
+        capture.capture_reference_artifact(
+            reference_type="web",
+            source_id="https://example.com",
+            action="web.search",
+            duration_ms=0,
+        )
+        is None
+    )
+
+
+def test_reference_capture_normalizes_non_finite_score() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+
+    with capture.bind_artifact_sink(sink):
+        capture.capture_reference_artifact(
+            reference_type="knowledge",
+            source_id="chunk-1",
+            action="knowledge.retrieve",
+            duration_ms=1,
+            score=float("nan"),
+        )
+
+    assert sink.snapshot()[0].score is None
+
+
+def test_reference_capture_redacts_url_credentials() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+    url = (
+        "https://user:password@example.com/report?section=gmv&"
+        "access_token=secret-value#private"
+    )
+
+    with capture.bind_artifact_sink(sink):
+        capture.capture_reference_artifact(
+            reference_type="web",
+            source_id="web-1",
+            action="web.fetch",
+            duration_ms=1,
+            source_name=url,
+            uri=url,
+            locator={"url": url},
+        )
+
+    artifact = sink.snapshot()[0]
+    assert artifact.uri == (
+        "https://example.com/report?section=gmv&access_token=%5BREDACTED%5D"
+    )
+    assert artifact.locator["url"] == artifact.uri
+    assert artifact.source_name == artifact.uri
+    assert "password" not in artifact.model_dump_json()
+    assert "secret-value" not in artifact.model_dump_json()
+
+
+def test_reference_capture_redacts_sensitive_query_name_families() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+    url = (
+        "https://example.com/report?client_secret=a&refresh_token=b&id_token=c&"
+        "x-api-key=d&access_key=e&secret_key=f&private_key=g&"
+        "AWSAccessKeyId=h&bearerToken=i&dbPassword=j&safe=value"
+    )
+
+    with capture.bind_artifact_sink(sink):
+        capture.capture_reference_artifact(
+            reference_type="web",
+            source_id="web-1",
+            action="web.fetch",
+            duration_ms=1,
+            uri=url,
+            locator={"requested_url": url, "final_url": url},
+        )
+
+    serialized = sink.snapshot()[0].model_dump_json()
+    for secret in "abcdefghij":
+        assert f"={secret}" not in serialized
+    assert "safe=value" in serialized
+    assert serialized.count("%5BREDACTED%5D") == 30
+
+
+def test_reference_capture_hashes_excerpt_parts_without_full_join() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+    parts = ["a" * 3_000, "b" * 3_000]
+
+    with capture.bind_artifact_sink(sink):
+        capture.capture_reference_artifact(
+            reference_type="knowledge",
+            source_id="document-1",
+            action="knowledge.cat",
+            duration_ms=1,
+            excerpt_parts=iter(parts),
+            excerpt_separator="\n",
+        )
+
+    artifact = sink.snapshot()[0]
+    complete = "\n".join(parts)
+    assert artifact.excerpt == complete[: capture.MAX_REFERENCE_EXCERPT_CHARS]
+    assert artifact.metadata["content_summary"] == {
+        "excerpt_chars": len(complete),
+        "excerpt_sha256": capture.sha256_text(complete),
+        "excerpt_truncated": True,
+    }
 
 
 def test_tabular_summary_is_lossless_and_bounds_preview() -> None:
