@@ -69,6 +69,16 @@ from dbgpt.core.interface.report import (  # noqa: F401
     TableBlock,
     TextBlock,
 )
+from dbgpt.core.interface.report_capture import (  # noqa: F401
+    ArtifactCaptureContext,
+    ArtifactSink,
+    InMemoryArtifactSink,
+    bind_artifact_sink,
+    get_current_artifact_sink,
+    sha256_bytes,
+    sha256_json,
+    sha256_text,
+)
 from dbgpt.core.interface.serialization import Serializable, Serializer  # noqa: F401
 from dbgpt.core.interface.storage import (  # noqa: F401
     DefaultStorageItemAdapter,
@@ -148,4 +158,12 @@ __ALL__ = [
     "SQLArtifact",
     "TableBlock",
     "TextBlock",
+    "ArtifactCaptureContext",
+    "ArtifactSink",
+    "InMemoryArtifactSink",
+    "bind_artifact_sink",
+    "get_current_artifact_sink",
+    "sha256_bytes",
+    "sha256_json",
+    "sha256_text",
 ]

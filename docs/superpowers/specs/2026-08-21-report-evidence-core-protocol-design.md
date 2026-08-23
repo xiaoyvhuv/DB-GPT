@@ -329,6 +329,10 @@ integrations.
 - Future optional producer information belongs in explicit metadata fields.
   Breaking protocol changes require a new schema version.
 
+PR3 subsequently applies that rule by introducing schema version 2 for real
+execution outcomes. Version 1 keeps its original serialized artifact field set;
+version 2 adds required artifact status and duration plus failure details.
+
 ## Testing
 
 Focused tests will live at:

@@ -51,6 +51,37 @@ def test_sql_artifact_preserves_executed_query_result() -> None:
     assert artifact.execution.step_id == "step-1"
 
 
+def test_failed_sql_artifact_preserves_failure_without_fabricated_result() -> None:
+    artifact = SQLArtifact(
+        artifact_id="sql-failed",
+        execution=EXECUTION,
+        created_at=CREATED_AT,
+        status="failed",
+        duration_ms=17,
+        error="database unavailable",
+        sql="SELECT 1",
+        result=None,
+    )
+
+    assert artifact.status == "failed"
+    assert artifact.duration_ms == 17
+    assert artifact.error == "database unavailable"
+    assert artifact.result is None
+
+
+def test_successful_sql_artifact_requires_a_real_result() -> None:
+    with pytest.raises(
+        ValidationError, match="successful SQL artifact requires result"
+    ):
+        SQLArtifact(
+            artifact_id="sql-missing-result",
+            execution=EXECUTION,
+            created_at=CREATED_AT,
+            sql="SELECT 1",
+            result=None,
+        )
+
+
 def test_python_and_chart_artifacts_preserve_execution_lineage() -> None:
     python = PythonArtifact(
         artifact_id="python-delta",
@@ -75,6 +106,46 @@ def test_python_and_chart_artifacts_preserve_execution_lineage() -> None:
     assert python.language == "python"
     assert python.input_artifact_ids == ["sql-sales"]
     assert chart.input_artifact_ids == ["python-delta"]
+
+
+def test_timed_out_python_artifact_preserves_real_process_state() -> None:
+    artifact = PythonArtifact(
+        artifact_id="python-timeout",
+        execution=EXECUTION,
+        created_at=CREATED_AT,
+        status="timed_out",
+        duration_ms=60_000,
+        error="execution timed out",
+        code="while True: pass",
+        exit_code=None,
+        stdout="",
+        stderr="",
+    )
+
+    assert artifact.status == "timed_out"
+    assert artifact.exit_code is None
+    assert artifact.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"status": "succeeded", "exit_code": None},
+        {"status": "succeeded", "exit_code": 1},
+        {"status": "succeeded", "exit_code": 0, "error": "unexpected"},
+        {"status": "timed_out", "exit_code": 0, "error": "timed out"},
+        {"status": "failed", "exit_code": 1, "error": None},
+    ],
+)
+def test_python_artifact_rejects_inconsistent_process_state(kwargs: dict) -> None:
+    with pytest.raises(ValidationError, match="artifact"):
+        PythonArtifact(
+            artifact_id="python-invalid",
+            execution=EXECUTION,
+            created_at=CREATED_AT,
+            code="print(1)",
+            **kwargs,
+        )
 
 
 def test_reference_artifact_preserves_current_knowledge_citation() -> None:
@@ -222,6 +293,15 @@ def _valid_report_payload() -> dict:
     }
 
 
+def _valid_v2_report_payload() -> dict:
+    payload = _valid_report_payload()
+    payload["schema_version"] = 2
+    for artifact in payload["artifacts"]:
+        artifact["status"] = "succeeded"
+        artifact["duration_ms"] = 1
+    return payload
+
+
 def test_report_round_trip_preserves_five_block_types_and_artifacts() -> None:
     report = ReportDocument.model_validate(_valid_report_payload())
     restored = ReportDocument.model_validate_json(report.model_dump_json())
@@ -234,6 +314,82 @@ def test_report_round_trip_preserves_five_block_types_and_artifacts() -> None:
     assert isinstance(restored.sections[0].blocks[2], ChartBlock)
     assert isinstance(restored.sections[0].blocks[3], InsightBlock)
     assert isinstance(restored.sections[0].blocks[4], TextBlock)
+
+
+def test_schema_v1_serialization_omits_v2_execution_fields() -> None:
+    report = ReportDocument.model_validate(_valid_report_payload())
+    serialized = report.model_dump(mode="json")
+
+    assert serialized["schema_version"] == 1
+    for artifact in serialized["artifacts"]:
+        assert "status" not in artifact
+        assert "duration_ms" not in artifact
+        assert "error" not in artifact
+        assert "stderr" not in artifact
+
+
+def test_schema_v1_rejects_v2_execution_fields() -> None:
+    payload = _valid_report_payload()
+    payload["artifacts"][0]["status"] = "succeeded"
+    payload["artifacts"][0]["duration_ms"] = 1
+
+    with pytest.raises(ValidationError, match="schema version 2"):
+        ReportDocument.model_validate(payload)
+
+
+def test_schema_v1_reads_payloads_valid_under_the_original_contract() -> None:
+    payload = _valid_report_payload()
+    payload["report_id"] = "r" * 65
+    payload["artifacts"][0]["execution"]["conv_uid"] = "conv-2"
+
+    report = ReportDocument.model_validate(payload)
+
+    assert report.report_id == "r" * 65
+    assert report.artifacts[0].execution.conv_uid == "conv-2"
+
+
+def test_schema_v2_preserves_failed_execution_without_a_result() -> None:
+    report = ReportDocument.model_validate(
+        {
+            "schema_version": 2,
+            "report_id": "report-failed",
+            "title": "Failed query",
+            "conv_uid": "conv-1",
+            "created_at": "2026-08-23T09:30:00",
+            "sections": [],
+            "artifacts": [
+                {
+                    "type": "sql",
+                    "artifact_id": "sql-failed",
+                    "execution": {
+                        "conv_uid": "conv-1",
+                        "step_id": "step-1",
+                        "run_id": "run-1",
+                    },
+                    "created_at": "2026-08-23T09:30:00",
+                    "status": "failed",
+                    "duration_ms": 15,
+                    "error": "database unavailable",
+                    "sql": "SELECT 1",
+                    "result": None,
+                }
+            ],
+        }
+    )
+    restored = ReportDocument.model_validate_json(report.model_dump_json())
+
+    assert restored.schema_version == 2
+    assert restored.artifacts[0].status == "failed"
+    assert isinstance(restored.artifacts[0], SQLArtifact)
+    assert restored.artifacts[0].result is None
+
+
+def test_schema_v2_requires_status_and_duration_for_every_artifact() -> None:
+    payload = _valid_report_payload()
+    payload["schema_version"] = 2
+
+    with pytest.raises(ValidationError, match="status and duration"):
+        ReportDocument.model_validate(payload)
 
 
 def test_evidence_separates_source_and_report_target_selectors() -> None:
@@ -309,6 +465,91 @@ def test_report_rejects_dangling_artifact_input() -> None:
     payload["artifacts"][1]["input_artifact_ids"] = ["missing"]
 
     with pytest.raises(ValidationError, match="unknown input artifact missing"):
+        ReportDocument.model_validate(payload)
+
+
+def test_report_rejects_artifact_from_another_conversation() -> None:
+    payload = _valid_v2_report_payload()
+    payload["artifacts"][0]["execution"]["conv_uid"] = "conv-2"
+
+    with pytest.raises(ValidationError, match="artifact conversation conv-2"):
+        ReportDocument.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("report_id", "r" * 65, "report_id exceeds 64"),
+        ("title", "t" * 513, "title exceeds 512"),
+        ("conv_uid", "c" * 256, "conv_uid exceeds 255"),
+    ],
+)
+def test_report_rejects_identifiers_larger_than_persistence_contract(
+    field: str, value: str, message: str
+) -> None:
+    payload = _valid_v2_report_payload()
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        ReportDocument.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda payload: payload["sections"][0].update({"section_id": "s" * 129}),
+            "section_id exceeds 128",
+        ),
+        (
+            lambda payload: payload["sections"][0]["blocks"][0].update(
+                {"block_id": "b" * 129}
+            ),
+            "block_id exceeds 128",
+        ),
+        (
+            lambda payload: payload["artifacts"][0].update({"artifact_id": "a" * 129}),
+            "artifact_id exceeds 128",
+        ),
+        (
+            lambda payload: payload["artifacts"][0]["execution"].update(
+                {"conv_uid": "c" * 256}
+            ),
+            "execution.conv_uid exceeds 255",
+        ),
+        (
+            lambda payload: payload["artifacts"][0]["execution"].update(
+                {"step_id": "s" * 256}
+            ),
+            "execution.step_id exceeds 255",
+        ),
+        (
+            lambda payload: payload["artifacts"][0]["execution"].update(
+                {"message_id": "m" * 256}
+            ),
+            "execution.message_id exceeds 255",
+        ),
+        (
+            lambda payload: payload["artifacts"][0]["execution"].update(
+                {"task_id": "t" * 65}
+            ),
+            "execution.task_id exceeds 64",
+        ),
+        (
+            lambda payload: payload["artifacts"][0]["execution"].update(
+                {"run_id": "r" * 65}
+            ),
+            "execution.run_id exceeds 64",
+        ),
+    ],
+)
+def test_schema_v2_rejects_nested_ids_larger_than_persistence_contract(
+    mutate, message: str
+) -> None:
+    payload = _valid_v2_report_payload()
+    mutate(payload)
+
+    with pytest.raises(ValidationError, match=message):
         ReportDocument.model_validate(payload)
 
 

@@ -13,8 +13,20 @@ from dbgpt._private.pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
+
+MAX_REPORT_ID_LENGTH = 64
+MAX_REPORT_TITLE_LENGTH = 512
+MAX_CONV_UID_LENGTH = 255
+MAX_RUN_ID_LENGTH = 64
+MAX_ARTIFACT_ID_LENGTH = 128
+MAX_STEP_ID_LENGTH = 255
+MAX_MESSAGE_ID_LENGTH = 255
+MAX_TASK_ID_LENGTH = 64
+MAX_SECTION_ID_LENGTH = 128
+MAX_BLOCK_ID_LENGTH = 128
 
 
 class _ProtocolModel(BaseModel):
@@ -27,6 +39,11 @@ def _require_non_blank(value: str) -> str:
     if not value.strip():
         raise ValueError("must not be blank")
     return value
+
+
+def _require_max_length(name: str, value: str, max_length: int) -> None:
+    if len(value) > max_length:
+        raise ValueError(f"{name} exceeds {max_length} characters")
 
 
 class ExecutionReference(_ProtocolModel):
@@ -74,6 +91,9 @@ class BaseArtifact(_ProtocolModel):
     execution: ExecutionReference
     input_artifact_ids: List[str] = Field(default_factory=list)
     created_at: datetime
+    status: Optional[Literal["succeeded", "failed", "cancelled", "timed_out"]] = None
+    duration_ms: Optional[int] = Field(default=None, ge=0)
+    error: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     _validate_artifact_id = field_validator("artifact_id")(_require_non_blank)
@@ -85,6 +105,30 @@ class BaseArtifact(_ProtocolModel):
             _require_non_blank(value)
         return values
 
+    @field_validator("error")
+    @classmethod
+    def validate_error(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            _require_non_blank(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "BaseArtifact":
+        if self.status == "succeeded" and self.error is not None:
+            raise ValueError("successful artifact must not contain an error")
+        if self.status in {"failed", "cancelled", "timed_out"} and self.error is None:
+            raise ValueError("non-successful artifact requires an error")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_versioned_fields(self, handler):
+        """Keep legacy v1 artifact JSON free of absent v2-only fields."""
+        data = handler(self)
+        for field_name in ("status", "duration_ms", "error", "stderr"):
+            if data.get(field_name) is None:
+                data.pop(field_name, None)
+        return data
+
 
 class SQLArtifact(BaseArtifact):
     """A read-only SQL execution and its result."""
@@ -95,9 +139,15 @@ class SQLArtifact(BaseArtifact):
     display_type: Optional[str] = None
     columns: List[str] = Field(default_factory=list)
     row_count: Optional[int] = Field(default=None, ge=0)
-    result: ArtifactContent
+    result: Optional[ArtifactContent] = None
 
     _validate_sql = field_validator("sql")(_require_non_blank)
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "SQLArtifact":
+        if self.status in {None, "succeeded"} and self.result is None:
+            raise ValueError("successful SQL artifact requires result")
+        return self
 
 
 class PythonArtifact(BaseArtifact):
@@ -106,12 +156,29 @@ class PythonArtifact(BaseArtifact):
     type: Literal["python"] = "python"
     code: str
     language: str = "python"
-    exit_code: int
+    exit_code: Optional[int]
     stdout: Optional[str] = None
+    stderr: Optional[str] = None
     result: Optional[ArtifactContent] = None
 
     _validate_code = field_validator("code")(_require_non_blank)
     _validate_language = field_validator("language")(_require_non_blank)
+
+    @model_validator(mode="after")
+    def validate_process_state(self) -> "PythonArtifact":
+        if self.status is None:
+            if self.exit_code is None:
+                raise ValueError("legacy Python artifact requires an exit code")
+            return self
+        if self.status == "succeeded" and self.exit_code != 0:
+            raise ValueError("successful Python artifact requires exit code 0")
+        if self.status in {"cancelled", "timed_out"} and self.exit_code is not None:
+            raise ValueError(
+                f"{self.status} Python artifact must not contain an exit code"
+            )
+        if self.status == "failed" and self.exit_code == 0:
+            raise ValueError("failed Python artifact cannot contain exit code 0")
+        return self
 
 
 class ChartArtifact(BaseArtifact):
@@ -249,7 +316,7 @@ class ReportSection(_ProtocolModel):
 class ReportDocument(_ProtocolModel):
     """A versioned report and its self-contained evidence registry."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     report_id: str
     title: str
     conv_uid: str
@@ -265,6 +332,35 @@ class ReportDocument(_ProtocolModel):
     @model_validator(mode="after")
     def validate_integrity(self) -> "ReportDocument":
         """Validate IDs, references, and the artifact dependency graph."""
+        if self.schema_version == 1:
+            for artifact in self.artifacts:
+                has_v2_fields = any(
+                    value is not None
+                    for value in (
+                        artifact.status,
+                        artifact.duration_ms,
+                        artifact.error,
+                    )
+                )
+                if isinstance(artifact, PythonArtifact):
+                    has_v2_fields = has_v2_fields or artifact.stderr is not None
+                if has_v2_fields:
+                    raise ValueError(
+                        "artifact execution outcome requires schema version 2"
+                    )
+        else:
+            self._validate_v2_persistence_lengths()
+            for artifact in self.artifacts:
+                if artifact.status is None or artifact.duration_ms is None:
+                    raise ValueError(
+                        "schema version 2 artifacts require status and duration"
+                    )
+                if artifact.execution.conv_uid != self.conv_uid:
+                    raise ValueError(
+                        f"artifact conversation {artifact.execution.conv_uid} does "
+                        f"not match report conversation {self.conv_uid}"
+                    )
+
         artifact_ids = [artifact.artifact_id for artifact in self.artifacts]
         duplicate = _find_duplicate(artifact_ids)
         if duplicate is not None:
@@ -317,6 +413,36 @@ class ReportDocument(_ProtocolModel):
                 )
         return self
 
+    def _validate_v2_persistence_lengths(self) -> None:
+        """Ensure new snapshots fit the shared relational persistence contract."""
+        _require_max_length("report_id", self.report_id, MAX_REPORT_ID_LENGTH)
+        _require_max_length("title", self.title, MAX_REPORT_TITLE_LENGTH)
+        _require_max_length("conv_uid", self.conv_uid, MAX_CONV_UID_LENGTH)
+
+        for section in self.sections:
+            _require_max_length("section_id", section.section_id, MAX_SECTION_ID_LENGTH)
+            for block in section.blocks:
+                _require_max_length("block_id", block.block_id, MAX_BLOCK_ID_LENGTH)
+
+        for artifact in self.artifacts:
+            _require_max_length(
+                "artifact_id", artifact.artifact_id, MAX_ARTIFACT_ID_LENGTH
+            )
+            execution = artifact.execution
+            _require_max_length(
+                "execution.conv_uid", execution.conv_uid, MAX_CONV_UID_LENGTH
+            )
+            _require_max_length(
+                "execution.step_id", execution.step_id, MAX_STEP_ID_LENGTH
+            )
+            for name, value, max_length in (
+                ("execution.message_id", execution.message_id, MAX_MESSAGE_ID_LENGTH),
+                ("execution.task_id", execution.task_id, MAX_TASK_ID_LENGTH),
+                ("execution.run_id", execution.run_id, MAX_RUN_ID_LENGTH),
+            ):
+                if value is not None:
+                    _require_max_length(name, value, max_length)
+
     @staticmethod
     def _validate_acyclic_artifacts(artifacts: Dict[str, BaseArtifact]) -> None:
         visited = set()
@@ -366,6 +492,16 @@ __all__ = [
     "EvidenceReference",
     "ExecutionReference",
     "InsightBlock",
+    "MAX_ARTIFACT_ID_LENGTH",
+    "MAX_BLOCK_ID_LENGTH",
+    "MAX_CONV_UID_LENGTH",
+    "MAX_MESSAGE_ID_LENGTH",
+    "MAX_REPORT_ID_LENGTH",
+    "MAX_REPORT_TITLE_LENGTH",
+    "MAX_RUN_ID_LENGTH",
+    "MAX_SECTION_ID_LENGTH",
+    "MAX_STEP_ID_LENGTH",
+    "MAX_TASK_ID_LENGTH",
     "MetricBlock",
     "PythonArtifact",
     "ReferenceArtifact",

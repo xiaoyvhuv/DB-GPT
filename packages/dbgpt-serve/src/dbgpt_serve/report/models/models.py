@@ -5,21 +5,23 @@ from datetime import datetime
 from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, String, Text, func
 from sqlalchemy.dialects import mysql
 
+from dbgpt.core.interface.report import (
+    MAX_ARTIFACT_ID_LENGTH,
+    MAX_BLOCK_ID_LENGTH,
+    MAX_CONV_UID_LENGTH,
+    MAX_MESSAGE_ID_LENGTH,
+    MAX_REPORT_ID_LENGTH,
+    MAX_REPORT_TITLE_LENGTH,
+    MAX_RUN_ID_LENGTH,
+    MAX_SECTION_ID_LENGTH,
+    MAX_STEP_ID_LENGTH,
+    MAX_TASK_ID_LENGTH,
+)
 from dbgpt.storage.metadata import Model
 
 _LONG_TEXT = Text().with_variant(mysql.LONGTEXT(), "mysql")
 _PRIMARY_KEY = BigInteger().with_variant(Integer, "sqlite")
-MAX_REPORT_ID_LENGTH = 64
 MAX_OWNER_ID_LENGTH = 255
-MAX_REPORT_TITLE_LENGTH = 512
-MAX_CONV_UID_LENGTH = 255
-MAX_RUN_ID_LENGTH = 64
-MAX_ARTIFACT_ID_LENGTH = 128
-MAX_STEP_ID_LENGTH = 255
-MAX_MESSAGE_ID_LENGTH = 255
-MAX_TASK_ID_LENGTH = 64
-MAX_SECTION_ID_LENGTH = 128
-MAX_BLOCK_ID_LENGTH = 128
 
 
 class ReportEntity(Model):

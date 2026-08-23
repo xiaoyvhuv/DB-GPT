@@ -109,6 +109,50 @@ def test_save_creates_lossless_snapshot_and_normalized_indexes():
         assert session.query(ReportEvidenceEntity).count() == 2
 
 
+def test_schema_v2_failed_artifact_round_trips_without_fabricated_result():
+    dao = ReportDao()
+    now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    document = ReportDocument(
+        schema_version=2,
+        report_id="report-failed",
+        title="Failed query",
+        conv_uid="conv-1",
+        created_at=now,
+        sections=[],
+        artifacts=[
+            SQLArtifact(
+                artifact_id="sql-failed",
+                execution=ExecutionReference(
+                    conv_uid="conv-1",
+                    step_id="step-1",
+                    run_id="capture-1",
+                    action="sql_query",
+                ),
+                created_at=now,
+                status="failed",
+                duration_ms=15,
+                error="database unavailable",
+                sql="SELECT 1",
+                result=None,
+            )
+        ],
+    )
+
+    saved = dao.save(document, owner_id="alice", run_id="run-failed")
+    restored = dao.get_run(
+        owner_id="alice",
+        report_id="report-failed",
+        run_id=saved.run_id,
+    )
+
+    assert restored is not None
+    assert restored.schema_version == 2
+    artifact = restored.document.artifacts[0]
+    assert isinstance(artifact, SQLArtifact)
+    assert artifact.status == "failed"
+    assert artifact.result is None
+
+
 def test_save_appends_revision_and_latest_read_changes_without_mutating_old_run():
     dao = ReportDao()
     first = dao.save(_document(), owner_id="alice", run_id="run-1")
