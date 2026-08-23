@@ -69,6 +69,7 @@ from dbgpt.core.interface.report import (  # noqa: F401
     TableBlock,
     TextBlock,
 )
+from dbgpt.core.interface.report_assembly import ReportAssembler  # noqa: F401
 from dbgpt.core.interface.report_capture import (  # noqa: F401
     ArtifactCaptureContext,
     ArtifactSink,
@@ -170,4 +171,5 @@ __ALL__ = [
     "sha256_bytes",
     "sha256_json",
     "sha256_text",
+    "ReportAssembler",
 ]

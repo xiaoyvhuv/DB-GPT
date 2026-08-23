@@ -1,8 +1,10 @@
 """Application service for owner-scoped report persistence."""
 
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from dbgpt.core.interface.report import ReportDocument
+from dbgpt.core.interface.report import Artifact, ReportDocument
+from dbgpt.core.interface.report_assembly import ReportAssembler
 
 from .domain import ReportEvidenceDetail, ReportRunRecord, ReportRunSummary
 from .models.dao import ReportDao
@@ -19,8 +21,13 @@ class ReportBlockNotFoundError(LookupError):
 class ReportService:
     """Thin orchestration layer above the transactional report DAO."""
 
-    def __init__(self, dao: Optional[ReportDao] = None) -> None:
+    def __init__(
+        self,
+        dao: Optional[ReportDao] = None,
+        assembler: Optional[ReportAssembler] = None,
+    ) -> None:
         self._dao = dao or ReportDao()
+        self._assembler = assembler or ReportAssembler()
 
     def save(
         self,
@@ -34,6 +41,39 @@ class ReportService:
         return self._dao.save(
             document,
             owner_id=owner_id,
+            trigger_type=trigger_type,
+            parent_run_id=parent_run_id,
+        )
+
+    def assemble_and_save(
+        self,
+        *,
+        owner_id: str,
+        report_id: str,
+        title: str,
+        conv_uid: str,
+        final_content: str,
+        artifacts: Sequence[Artifact],
+        supporting_artifact_ids: Iterable[str] = (),
+        metadata: Optional[Dict[str, Any]] = None,
+        created_at: Optional[datetime] = None,
+        trigger_type: str = "interactive",
+        parent_run_id: Optional[str] = None,
+    ) -> ReportRunRecord:
+        """Assemble one captured turn and persist it as an immutable revision."""
+        document = self._assembler.assemble(
+            report_id=report_id,
+            title=title,
+            conv_uid=conv_uid,
+            final_content=final_content,
+            artifacts=artifacts,
+            supporting_artifact_ids=supporting_artifact_ids,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        return self.save(
+            owner_id=owner_id,
+            document=document,
             trigger_type=trigger_type,
             parent_run_id=parent_run_id,
         )

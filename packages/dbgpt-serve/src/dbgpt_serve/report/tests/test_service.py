@@ -1,8 +1,15 @@
 """Report service behavior tests."""
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+
+from dbgpt.core.interface.report import (
+    ArtifactContent,
+    ExecutionReference,
+    SQLArtifact,
+)
 
 from ..domain import ReportRunRecord
 from ..service import ReportBlockNotFoundError, ReportNotFoundError, ReportService
@@ -30,6 +37,46 @@ def test_save_delegates_server_owned_owner_and_run_metadata():
         trigger_type="replay",
         parent_run_id="run-old",
     )
+
+
+def test_assemble_and_save_builds_v2_document_from_captured_artifacts():
+    dao = MagicMock()
+    expected = MagicMock(spec=ReportRunRecord)
+    dao.save.return_value = expected
+    artifact = SQLArtifact(
+        artifact_id="sql-total",
+        execution=ExecutionReference(
+            conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+        ),
+        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        status="succeeded",
+        duration_ms=3,
+        sql="SELECT 42 AS total",
+        columns=["total"],
+        row_count=1,
+        result=ArtifactContent(inline={"columns": ["total"], "rows": [[42]]}),
+    )
+
+    actual = ReportService(dao).assemble_and_save(
+        owner_id="alice",
+        report_id="report-conv-1",
+        title="Sales",
+        conv_uid="conv-1",
+        final_content="The total is 42.",
+        artifacts=[artifact],
+    )
+
+    assert actual is expected
+    document = dao.save.call_args.args[0]
+    assert document.schema_version == 2
+    assert document.report_id == "report-conv-1"
+    assert document.artifacts[0].artifact_id == "sql-total"
+    assert document.sections[1].blocks[0].value == 42
+    assert dao.save.call_args.kwargs == {
+        "owner_id": "alice",
+        "trigger_type": "interactive",
+        "parent_run_id": None,
+    }
 
 
 def test_get_latest_raises_domain_not_found():

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -8,7 +9,9 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -44,6 +47,7 @@ from dbgpt.agent.skill.manage import get_skill_manager
 from dbgpt.component import ComponentType
 from dbgpt.configs.model_config import SKILLS_DIR, resolve_root_path
 from dbgpt.core import PromptTemplate
+from dbgpt.core.interface.report import MAX_REPORT_TITLE_LENGTH
 from dbgpt.core.interface.report_capture import (
     ArtifactCaptureContext,
     ArtifactSink,
@@ -88,6 +92,14 @@ if TYPE_CHECKING:
 
 REACT_AGENT_MEMORY_CACHE: Dict[str, "GptsMemory"] = {}
 _CaptureResult = TypeVar("_CaptureResult")
+_REPORT_PERSIST_TIMEOUT_SECONDS = 5.0
+_REPORT_PERSIST_MAX_IN_FLIGHT = 2
+_REPORT_PERSIST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_REPORT_PERSIST_MAX_IN_FLIGHT,
+    thread_name_prefix="dbgpt-report-persist",
+)
+_REPORT_PERSIST_SLOTS = BoundedSemaphore(_REPORT_PERSIST_MAX_IN_FLIGHT)
+_REPORT_PERSIST_TASKS: set["asyncio.Task[Any]"] = set()
 
 DEFAULT_SKILLS_DIR = SKILLS_DIR
 AUTO_DATA_MARKER_PATTERN = re.compile(
@@ -1101,6 +1113,102 @@ async def _run_with_artifact_capture(
     """Run one agent operation with task-local artifact capture enabled."""
     with bind_artifact_sink(sink):
         return await operation()
+
+
+async def _assemble_and_persist_turn_report(
+    *,
+    dialogue: ConversationVo,
+    conv_id: str,
+    user_input: str,
+    final_answer: AgentFinalAnswer,
+    artifact_sink: Optional[InMemoryArtifactSink],
+) -> Optional[Any]:
+    """Persist one captured ReAct turn without changing legacy response behavior."""
+    if artifact_sink is None:
+        return None
+    owner_id = (dialogue.user_name or "").strip()
+    if not owner_id or not final_answer.content.strip():
+        return None
+
+    try:
+        from dbgpt_serve.report.serve import ReportServe
+
+        serve = ReportServe.get_current_serve(CFG.SYSTEM_APP)
+        service = serve.service if serve is not None else None
+        if service is None:
+            logger.warning("Report persistence service is unavailable")
+            return None
+
+        title = next(
+            (line.strip() for line in user_input.splitlines() if line.strip()),
+            "Analysis report",
+        )[:MAX_REPORT_TITLE_LENGTH]
+        report_token = hashlib.sha256(conv_id.encode("utf-8")).hexdigest()[:40]
+
+        def assemble_and_save():
+            artifacts = artifact_sink.snapshot()
+            if not artifacts:
+                return None
+            return service.assemble_and_save(
+                owner_id=owner_id,
+                report_id=f"report-{report_token}",
+                title=title,
+                conv_uid=conv_id,
+                final_content=final_answer.content,
+                artifacts=artifacts,
+                metadata={
+                    "source": "react_agent",
+                    "capture_run_id": artifact_sink.context.run_id,
+                },
+            )
+
+        if not _REPORT_PERSIST_SLOTS.acquire(blocking=False):
+            logger.warning("Report persistence capacity is saturated; skipping turn")
+            return None
+        try:
+            future = _REPORT_PERSIST_EXECUTOR.submit(assemble_and_save)
+        except Exception:
+            _REPORT_PERSIST_SLOTS.release()
+            raise
+        future.add_done_callback(lambda _future: _REPORT_PERSIST_SLOTS.release())
+        return await asyncio.wrap_future(future)
+    except Exception:
+        logger.exception("Failed to assemble or persist report")
+        return None
+
+
+def _schedule_turn_report_persistence(
+    *,
+    dialogue: ConversationVo,
+    conv_id: str,
+    user_input: str,
+    final_answer: AgentFinalAnswer,
+    artifact_sink: Optional[InMemoryArtifactSink],
+    react_state: Dict[str, Any],
+) -> "asyncio.Task[None]":
+    """Start bounded report persistence without delaying history or terminal SSE."""
+
+    async def persist() -> None:
+        try:
+            report_run = await asyncio.wait_for(
+                _assemble_and_persist_turn_report(
+                    dialogue=dialogue,
+                    conv_id=conv_id,
+                    user_input=user_input,
+                    final_answer=final_answer,
+                    artifact_sink=artifact_sink,
+                ),
+                timeout=_REPORT_PERSIST_TIMEOUT_SECONDS,
+            )
+            if report_run is not None:
+                react_state["_report_run"] = report_run
+        except asyncio.TimeoutError:
+            logger.warning("Report persistence timed out")
+
+    task = asyncio.create_task(persist())
+    _REPORT_PERSIST_TASKS.add(task)
+    task.add_done_callback(_REPORT_PERSIST_TASKS.discard)
+    return task
 
 
 async def _react_agent_stream(
@@ -3480,11 +3588,21 @@ Thought/Action/Action Input format shown above.
             input_files=input_files_snapshot,
             citations=[],
         )
-        for terminal_event in _react_terminal_events(
+        error_answer = AgentFinalAnswer(content=err_msg)
+        terminal_events = _react_terminal_events(
             storage_conv,
             error_payload,
-            AgentFinalAnswer(content=err_msg),
-        ):
+            error_answer,
+        )
+        _schedule_turn_report_persistence(
+            dialogue=dialogue,
+            conv_id=conv_id,
+            user_input=user_input,
+            final_answer=error_answer,
+            artifact_sink=artifact_sink,
+            react_state=react_state,
+        )
+        for terminal_event in terminal_events:
             yield terminal_event
         return
 
@@ -3552,11 +3670,20 @@ Thought/Action/Action Input format shown above.
         input_files=input_files_snapshot,
         citations=[citation.to_dict() for citation in final_answer.citations],
     )
-    for terminal_event in _react_terminal_events(
+    terminal_events = _react_terminal_events(
         storage_conv,
         history_payload,
         final_answer,
-    ):
+    )
+    _schedule_turn_report_persistence(
+        dialogue=dialogue,
+        conv_id=conv_id,
+        user_input=user_input,
+        final_answer=final_answer,
+        artifact_sink=artifact_sink,
+        react_state=react_state,
+    )
+    for terminal_event in terminal_events:
         yield terminal_event
 
 

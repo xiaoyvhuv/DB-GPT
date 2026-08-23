@@ -2,17 +2,27 @@
 
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+from dbgpt.core.interface.report import (
+    ArtifactContent,
+    ExecutionReference,
+    SQLArtifact,
+)
 from dbgpt.core.interface.report_capture import (
     ArtifactCaptureContext,
     InMemoryArtifactSink,
     get_current_artifact_sink,
 )
 from dbgpt_app.openapi.api_v1 import agentic_data_api
-from dbgpt_app.openapi.api_v1.react_final import AgentFinalAnswer
+from dbgpt_app.openapi.api_v1.react_final import AgentCitation, AgentFinalAnswer
+from dbgpt_serve.report.serve import ReportServe
 
 
 def _decode_sse_event(event: str):
@@ -66,6 +76,305 @@ async def test_agent_operation_binds_and_restores_turn_artifact_sink() -> None:
 
     assert result == "done"
     assert get_current_artifact_sink() is None
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_assembles_and_persists_captured_report(
+    monkeypatch,
+) -> None:
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-total",
+            execution=ExecutionReference(
+                conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+            ),
+            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            status="succeeded",
+            duration_ms=2,
+            sql="SELECT 42 AS total",
+            columns=["total"],
+            row_count=1,
+            result=ArtifactContent(inline={"columns": ["total"], "rows": [[42]]}),
+        )
+    )
+    service = MagicMock()
+    expected = SimpleNamespace(run_id="run-1", report_id="report-1")
+    service.assemble_and_save.return_value = expected
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+    final_answer = AgentFinalAnswer(
+        content="The total is 42.",
+        citations=(
+            AgentCitation(
+                index=1,
+                id="chunk-1",
+                source_name="Sales handbook",
+                excerpt="Definition of total sales.",
+            ),
+        ),
+    )
+
+    actual = await agentic_data_api._assemble_and_persist_turn_report(
+        dialogue=SimpleNamespace(user_name="alice"),
+        conv_id="conv-1",
+        user_input="Analyze total sales\nwith evidence",
+        final_answer=final_answer,
+        artifact_sink=sink,
+    )
+
+    assert actual is expected
+    kwargs = service.assemble_and_save.call_args.kwargs
+    assert kwargs["owner_id"] == "alice"
+    assert kwargs["report_id"] == ("report-36524fd8f6747fc2712506d01fee0e18b48cd626")
+    assert kwargs["title"] == "Analyze total sales"
+    assert kwargs["conv_uid"] == "conv-1"
+    assert kwargs["artifacts"][0].artifact_id == "sql-total"
+    assert "supporting_artifact_ids" not in kwargs
+    assert kwargs["metadata"] == {
+        "source": "react_agent",
+        "capture_run_id": "turn-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_report_persistence_failure_does_not_break_completed_turn(
+    monkeypatch, caplog
+) -> None:
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-failed",
+            execution=ExecutionReference(
+                conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+            ),
+            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            status="failed",
+            duration_ms=2,
+            error="database unavailable",
+            sql="SELECT 1",
+        )
+    )
+    service = MagicMock()
+    service.assemble_and_save.side_effect = RuntimeError("storage unavailable")
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+
+    actual = await agentic_data_api._assemble_and_persist_turn_report(
+        dialogue=SimpleNamespace(user_name="alice"),
+        conv_id="conv-1",
+        user_input="Run query",
+        final_answer=AgentFinalAnswer(content="The query failed."),
+        artifact_sink=sink,
+    )
+
+    assert actual is None
+    assert "Failed to assemble or persist report" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_report_persistence_scheduler_is_background_and_bounded(
+    monkeypatch, caplog
+) -> None:
+    never = asyncio.Event()
+
+    async def _never_persist(**_kwargs):
+        await never.wait()
+
+    monkeypatch.setattr(
+        agentic_data_api,
+        "_assemble_and_persist_turn_report",
+        _never_persist,
+    )
+    monkeypatch.setattr(agentic_data_api, "_REPORT_PERSIST_TIMEOUT_SECONDS", 0.1)
+
+    task = agentic_data_api._schedule_turn_report_persistence(
+        dialogue=SimpleNamespace(user_name="alice"),
+        conv_id="conv-1",
+        user_input="Analyze sales",
+        final_answer=AgentFinalAnswer(content="Answer"),
+        artifact_sink=None,
+        react_state={},
+    )
+
+    assert not task.done()
+    await task
+    assert "Report persistence timed out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_report_timeout_abandons_blocking_service_wait(
+    monkeypatch, caplog
+) -> None:
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    def _block_save(**_kwargs):
+        started.set()
+        try:
+            release.wait(timeout=1)
+        finally:
+            finished.set()
+
+    service = MagicMock()
+    service.assemble_and_save.side_effect = _block_save
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+    monkeypatch.setattr(agentic_data_api, "_REPORT_PERSIST_TIMEOUT_SECONDS", 0.1)
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-blocking",
+            execution=ExecutionReference(
+                conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+            ),
+            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            status="failed",
+            duration_ms=2,
+            error="database unavailable",
+            sql="SELECT 1",
+        )
+    )
+
+    task = agentic_data_api._schedule_turn_report_persistence(
+        dialogue=SimpleNamespace(user_name="alice"),
+        conv_id="conv-1",
+        user_input="Analyze sales",
+        final_answer=AgentFinalAnswer(content="Answer"),
+        artifact_sink=sink,
+        react_state={},
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.wait_for(task, timeout=0.5)
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+
+    assert "Report persistence timed out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_report_persistence_capacity_does_not_exhaust_shared_executor(
+    monkeypatch, caplog
+) -> None:
+    executor = ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="test-report-persist"
+    )
+    slots = threading.BoundedSemaphore(2)
+    started = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _block_save(**_kwargs):
+        started.release()
+        release.wait(timeout=1)
+
+    service = MagicMock()
+    service.assemble_and_save.side_effect = _block_save
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+    monkeypatch.setattr(agentic_data_api, "_REPORT_PERSIST_EXECUTOR", executor)
+    monkeypatch.setattr(agentic_data_api, "_REPORT_PERSIST_SLOTS", slots)
+    monkeypatch.setattr(agentic_data_api, "_REPORT_PERSIST_TIMEOUT_SECONDS", 0.1)
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-capacity",
+            execution=ExecutionReference(
+                conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+            ),
+            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            status="failed",
+            duration_ms=2,
+            error="database unavailable",
+            sql="SELECT 1",
+        )
+    )
+
+    def schedule():
+        return agentic_data_api._schedule_turn_report_persistence(
+            dialogue=SimpleNamespace(user_name="alice"),
+            conv_id="conv-1",
+            user_input="Analyze sales",
+            final_answer=AgentFinalAnswer(content="Answer"),
+            artifact_sink=sink,
+            react_state={},
+        )
+
+    first = schedule()
+    second = schedule()
+    try:
+        assert await asyncio.to_thread(started.acquire, True, 1)
+        assert await asyncio.to_thread(started.acquire, True, 1)
+        await asyncio.gather(first, second)
+
+        third = schedule()
+        await third
+
+        assert "capacity is saturated" in caplog.text
+        assert service.assemble_and_save.call_count == 2
+        assert await asyncio.to_thread(lambda: "shared executor available") == (
+            "shared executor available"
+        )
+    finally:
+        release.set()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+@pytest.mark.asyncio
+async def test_report_persistence_skips_empty_snapshot_and_owner(monkeypatch) -> None:
+    service = MagicMock()
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+    empty_sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+
+    assert (
+        await agentic_data_api._assemble_and_persist_turn_report(
+            dialogue=SimpleNamespace(user_name="alice"),
+            conv_id="conv-1",
+            user_input="Analyze sales",
+            final_answer=AgentFinalAnswer(content="Answer"),
+            artifact_sink=empty_sink,
+        )
+        is None
+    )
+    assert (
+        await agentic_data_api._assemble_and_persist_turn_report(
+            dialogue=SimpleNamespace(user_name=""),
+            conv_id="conv-1",
+            user_input="Analyze sales",
+            final_answer=AgentFinalAnswer(content="Answer"),
+            artifact_sink=empty_sink,
+        )
+        is None
+    )
+    service.assemble_and_save.assert_not_called()
 
 
 @pytest.mark.asyncio
