@@ -17,6 +17,9 @@
 - Require caller-supplied stable IDs; do not generate UUIDs in protocol models.
 - Set `schema_version` to integer `1` and reject undeclared top-level fields.
 - SQL, Python, and chart artifacts are typed; knowledge, memory, web, and model sources use the generic reference artifact.
+- The evidence graph records execution lineage, never hidden model reasoning or chain of thought.
+- Report blocks have five variants: metric, table, chart, insight, and text.
+- Evidence keeps source `selector` and report-side `target_selector` separate so one metric embedded in a multi-metric text block can be addressed independently.
 - Validation is structural and must not execute SQL, access files or URIs, compute hashes, or judge insight truth.
 - Run every Python command through `conda run -n dbgpt_env` so checks use `E:\software\Anaconda\envs\dbgpt_env`.
 - Do not run the repository `make` targets on Windows: the current Makefile creates `.venv.make` and assumes Unix `bin/activate`.
@@ -340,7 +343,7 @@ Expected: one commit containing only the artifact protocol and its tests.
 
 **Interfaces:**
 - Consumes: `Artifact`, `ArtifactContent`, and concrete artifact classes from Task 1.
-- Produces: `EvidenceReference`, `MetricBlock`, `ChartBlock`, `InsightBlock`, `TextBlock`, `ReportBlock`, `ReportSection`, and `ReportDocument`.
+- Produces: `EvidenceReference`, `MetricBlock`, `TableBlock`, `ChartBlock`, `InsightBlock`, `TextBlock`, `ReportBlock`, `ReportSection`, and `ReportDocument`.
 
 - [ ] **Step 1: Add failing report construction and round-trip tests**
 
@@ -354,6 +357,7 @@ from dbgpt.core.interface.report import (
     MetricBlock,
     ReportDocument,
     ReportSection,
+    TableBlock,
     TextBlock,
 )
 
@@ -416,8 +420,15 @@ def _valid_report_payload() -> dict:
                                 "artifact_id": "sql-sales",
                                 "role": "source",
                                 "selector": {"column": "gmv", "row": 0},
+                                "target_selector": {"marker_id": "gmv-value"},
                             }
                         ],
+                    },
+                    {
+                        "type": "table",
+                        "block_id": "table-gmv",
+                        "title": "GMV rows",
+                        "data_artifact_id": "sql-sales",
                     },
                     {
                         "type": "chart",
@@ -455,9 +466,10 @@ def test_report_round_trip_preserves_concrete_artifacts_and_blocks() -> None:
     assert isinstance(restored.artifacts[1], PythonArtifact)
     assert isinstance(restored.artifacts[2], ChartArtifact)
     assert isinstance(restored.sections[0].blocks[0], MetricBlock)
-    assert isinstance(restored.sections[0].blocks[1], ChartBlock)
-    assert isinstance(restored.sections[0].blocks[2], InsightBlock)
-    assert isinstance(restored.sections[0].blocks[3], TextBlock)
+    assert isinstance(restored.sections[0].blocks[1], TableBlock)
+    assert isinstance(restored.sections[0].blocks[2], ChartBlock)
+    assert isinstance(restored.sections[0].blocks[3], InsightBlock)
+    assert isinstance(restored.sections[0].blocks[4], TextBlock)
     assert restored.sections[0].blocks[0].evidence[0].selector == {
         "column": "gmv",
         "row": 0,
@@ -507,6 +519,7 @@ class EvidenceReference(_ProtocolModel):
     artifact_id: str
     role: Literal["source", "calculation", "support"]
     selector: Dict[str, Any] = Field(default_factory=dict)
+    target_selector: Dict[str, Any] = Field(default_factory=dict)
 
     _validate_artifact_id = field_validator("artifact_id")(_require_non_blank)
 
@@ -543,6 +556,16 @@ class ChartBlock(BaseReportBlock):
     )
 
 
+class TableBlock(BaseReportBlock):
+    type: Literal["table"] = "table"
+    data_artifact_id: str
+    description: Optional[str] = None
+
+    _validate_data_artifact_id = field_validator("data_artifact_id")(
+        _require_non_blank
+    )
+
+
 class InsightBlock(BaseReportBlock):
     type: Literal["insight"] = "insight"
     content: str
@@ -564,7 +587,7 @@ class TextBlock(BaseReportBlock):
 
 
 ReportBlock = Annotated[
-    Union[MetricBlock, ChartBlock, InsightBlock, TextBlock],
+    Union[MetricBlock, TableBlock, ChartBlock, InsightBlock, TextBlock],
     Field(discriminator="type"),
 ]
 
@@ -911,6 +934,7 @@ def test_report_protocol_is_available_from_core_public_api() -> None:
         "ReportDocument",
         "ReportSection",
         "SQLArtifact",
+        "TableBlock",
         "TextBlock",
     }
 
@@ -951,6 +975,7 @@ __all__ = [
     "ReportDocument",
     "ReportSection",
     "SQLArtifact",
+    "TableBlock",
     "TextBlock",
 ]
 ```

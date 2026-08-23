@@ -20,12 +20,19 @@ outputs to this protocol without making `dbgpt-core` depend on `dbgpt-app` or
 PR1 includes:
 
 - a report document made of sections and typed blocks;
+- five report block variants: metric, table, chart, insight, and text;
 - typed SQL, Python, chart, and reference artifacts;
 - references from report blocks to artifacts;
 - artifact-to-artifact dependencies;
 - execution references that use DB-GPT's existing conversation and step IDs;
 - strict structural validation and JSON round-trip support;
 - public exports and focused unit tests.
+
+The evidence graph describes an execution lineage, not a model reasoning or
+chain-of-thought trace. Its intended direction is
+`source artifact -> executed artifact -> rendered artifact -> report block`.
+Producer adapters may persist tool/action inputs, output summaries, status,
+and timing in later PRs, but the protocol does not expose private reasoning.
 
 PR1 excludes:
 
@@ -198,6 +205,7 @@ class EvidenceReference(BaseModel):
     artifact_id: str
     role: Literal["source", "calculation", "support"]
     selector: Dict[str, Any]
+    target_selector: Dict[str, Any]
 ```
 
 The roles have narrow meanings:
@@ -208,7 +216,10 @@ The roles have narrow meanings:
 
 `selector` preserves producer-specific location information such as a SQL
 column, row, cell, or Python output key. PR1 stores selectors but does not
-interpret them.
+interpret them. `target_selector` locates the claim inside the report block,
+for example an HTML/Markdown marker ID for one of several metrics embedded in
+the same text block. Keeping source and target selectors separate allows the
+frontend to open exactly the evidence associated with the clicked value.
 
 ## Report Document
 
@@ -239,6 +250,11 @@ class ChartBlock(BaseReportBlock):
     chart_artifact_id: str
     description: Optional[str]
 
+class TableBlock(BaseReportBlock):
+    type: Literal["table"]
+    data_artifact_id: str
+    description: Optional[str]
+
 class InsightBlock(BaseReportBlock):
     type: Literal["insight"]
     content: str
@@ -265,7 +281,9 @@ metadata: Dict[str, Any]
 Metric and insight blocks require evidence. Text blocks may omit evidence
 because narrative headings and explanatory copy are not necessarily derived
 from an execution. Chart blocks use `chart_artifact_id` as the render target
-and may carry additional evidence for upstream SQL or Python artifacts.
+and may carry additional evidence for upstream SQL or Python artifacts. Table
+blocks use `data_artifact_id` to reference a SQL or Python artifact containing
+the tabular result; they do not duplicate result rows in the report schema.
 
 ## Validation Rules
 
@@ -281,9 +299,11 @@ Pydantic field and model validators enforce protocol integrity:
 8. A `ChartBlock.chart_artifact_id` exists and identifies a `ChartArtifact`.
 9. A `ChartArtifact` has at least one input artifact and ultimately depends on
    SQL or Python data.
-10. `ArtifactContent` contains inline data, a URI, or both.
-11. `size`, `row_count`, and reference `score` cannot be negative.
-12. Metric and insight blocks contain at least one evidence reference.
+10. A `TableBlock.data_artifact_id` exists and identifies a SQL or Python
+    artifact.
+11. `ArtifactContent` contains inline data, a URI, or both.
+12. `size`, `row_count`, and reference `score` cannot be negative.
+13. Metric and insight blocks contain at least one evidence reference.
 
 Cross-reference and dependency validation occurs at `ReportDocument`, where
 the complete artifact registry is available. Validators raise the project's
