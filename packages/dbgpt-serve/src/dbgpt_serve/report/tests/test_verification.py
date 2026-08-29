@@ -10,12 +10,17 @@ from dbgpt.core.interface.report import (
     ExecutionReference,
     SQLArtifact,
 )
+from dbgpt_serve.report.verification.aggregation import (
+    ReportAggregator,
+    RuleBasedWeightResolver,
+)
 from dbgpt_serve.report.verification.evidence import (
     EvidencePacketBuilder,
     EvidenceResolver,
     ResolvedEvidence,
 )
 from dbgpt_serve.report.verification.exact import ExactMetricVerifier
+from dbgpt_serve.report.verification.router import VerifierRouter
 from dbgpt_serve.report.verification.trend import TrendRuleVerifier
 
 
@@ -116,3 +121,64 @@ def test_trend_verifier_does_not_invent_significant_threshold() -> None:
 
     assert result.status == "insufficient_evidence"
     assert result.reason_code == "INSUFFICIENT_RULE"
+
+
+def test_router_marks_unsupported_claim_types_as_unverifiable() -> None:
+    claim = Claim(
+        claim_id="claim-description",
+        claim_type="descriptive",
+        text="履约风险得到控制",
+    )
+
+    result = VerifierRouter(metric_definitions={}).verify(claim, EvidencePacket(), [])
+
+    assert result.status == "unverifiable"
+    assert result.reason_code == "NO_DETERMINISTIC_VERIFIER"
+
+
+def test_aggregator_excludes_recommendations_and_weights_critical_claims() -> None:
+    verified = Claim(
+        claim_id="claim-verified",
+        claim_type="metric",
+        text="GMV 为 100",
+        normalized={"metric_key": "gmv"},
+    )
+    unsupported = Claim(
+        claim_id="claim-unsupported",
+        claim_type="metric",
+        text="GMV 环比增长 10%",
+        normalized={"metric_key": "gmv"},
+    )
+    recommendation = Claim(
+        claim_id="claim-recommendation",
+        claim_type="recommendation",
+        text="建议加强运营",
+    )
+    resolver = RuleBasedWeightResolver(primary_metric_keys={"gmv"})
+    summary = ReportAggregator().aggregate(
+        claims=[verified, unsupported, recommendation],
+        verifications={
+            "claim-verified": _verification("claim-verified", "verified"),
+            "claim-unsupported": _verification("claim-unsupported", "unsupported"),
+        },
+        importance=[resolver.resolve(verified), resolver.resolve(unsupported)],
+        evidence_counts={"claim-verified": 1, "claim-unsupported": 1},
+    )
+
+    assert summary.evidence_coverage == 1.0
+    assert summary.factual_grounding_score == 0.5
+    assert summary.business_critical_grounding_score == 0.5
+    assert summary.contradicted_claim_count == 0
+
+
+def _verification(claim_id: str, status: str):
+    from dbgpt.core.interface.report import ClaimVerificationResult
+
+    return ClaimVerificationResult(
+        claim_id=claim_id,
+        status=status,
+        verification_method="exact_match",
+        evidence_artifact_ids=[],
+        verifier_name="test",
+        verifier_version="1",
+    )
