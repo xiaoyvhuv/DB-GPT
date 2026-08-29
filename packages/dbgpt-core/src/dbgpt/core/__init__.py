@@ -12,6 +12,10 @@ from dbgpt.core.interface.embeddings import (  # noqa: F401
     Embeddings,
     RerankEmbeddings,
 )
+from dbgpt.core.interface.evidence_packet import (  # noqa: F401
+    EvidenceHandle,
+    EvidencePacket,
+)
 from dbgpt.core.interface.knowledge import Chunk, Document  # noqa: F401
 from dbgpt.core.interface.llm import (  # noqa: F401
     DefaultMessageConverter,
@@ -56,6 +60,10 @@ from dbgpt.core.interface.report import (  # noqa: F401
     ArtifactContent,
     ChartArtifact,
     ChartBlock,
+    Claim,
+    ClaimSegment,
+    ClaimType,
+    ClaimVerificationResult,
     EvidenceReference,
     ExecutionReference,
     InsightBlock,
@@ -65,9 +73,13 @@ from dbgpt.core.interface.report import (  # noqa: F401
     ReportBlock,
     ReportDocument,
     ReportSection,
+    ReportTextSegment,
     SQLArtifact,
     TableBlock,
     TextBlock,
+    TextSegment,
+    VerificationMethod,
+    VerificationStatus,
 )
 from dbgpt.core.interface.report_assembly import ReportAssembler  # noqa: F401
 from dbgpt.core.interface.report_capture import (  # noqa: F401
@@ -149,7 +161,13 @@ __ALL__ = [
     "ArtifactContent",
     "ChartArtifact",
     "ChartBlock",
+    "Claim",
+    "ClaimSegment",
+    "ClaimType",
+    "ClaimVerificationResult",
     "EvidenceReference",
+    "EvidenceHandle",
+    "EvidencePacket",
     "ExecutionReference",
     "InsightBlock",
     "MetricBlock",
@@ -158,9 +176,13 @@ __ALL__ = [
     "ReportBlock",
     "ReportDocument",
     "ReportSection",
+    "ReportTextSegment",
     "SQLArtifact",
     "TableBlock",
     "TextBlock",
+    "TextSegment",
+    "VerificationMethod",
+    "VerificationStatus",
     "ArtifactCaptureContext",
     "ArtifactSink",
     "InMemoryArtifactSink",
