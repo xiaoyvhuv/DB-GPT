@@ -41,6 +41,7 @@ from dbgpt.core.interface.message import (  # noqa: F401
     StorageConversation,
     SystemMessage,
 )
+from dbgpt.core.interface.metric import BetterDirection, MetricDefinition  # noqa: F401
 from dbgpt.core.interface.output_parser import (  # noqa: F401
     BaseOutputParser,
     SQLOutputParser,
@@ -168,6 +169,8 @@ __ALL__ = [
     "EvidenceReference",
     "EvidenceHandle",
     "EvidencePacket",
+    "BetterDirection",
+    "MetricDefinition",
     "ExecutionReference",
     "InsightBlock",
     "MetricBlock",

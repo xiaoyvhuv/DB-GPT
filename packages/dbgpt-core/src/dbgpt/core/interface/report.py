@@ -245,13 +245,18 @@ VerificationStatus = Literal[
     "verified",
     "partially_supported",
     "unsupported",
+    "insufficient_evidence",
     "contradicted",
     "unverifiable",
+    "error",
 ]
 
 VerificationMethod = Literal[
     "exact_match",
     "recompute",
+    "comparison_rule",
+    "trend_rule",
+    "business_rule",
     "time_series_rule",
     "ranking_rule",
     "nli",
@@ -272,10 +277,20 @@ class ClaimVerificationResult(_ProtocolModel):
     verifier_version: str
     verified_at: Optional[datetime] = None
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    reason_code: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+    latency_ms: Optional[int] = Field(default=None, ge=0)
 
     _validate_claim_id = field_validator("claim_id")(_require_non_blank)
     _validate_verifier_name = field_validator("verifier_name")(_require_non_blank)
     _validate_verifier_version = field_validator("verifier_version")(_require_non_blank)
+
+    @field_validator("reason_code")
+    @classmethod
+    def validate_reason_code(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            _require_non_blank(value)
+        return value
 
     @field_validator("evidence_artifact_ids")
     @classmethod

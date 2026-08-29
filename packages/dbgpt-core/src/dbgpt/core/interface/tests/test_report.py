@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from dbgpt.core.interface.evidence_packet import EvidenceHandle, EvidencePacket
+from dbgpt.core.interface.metric import BetterDirection, MetricDefinition
 from dbgpt.core.interface.report import (
     ArtifactContent,
     ChartArtifact,
@@ -36,6 +37,37 @@ EXECUTION = ExecutionReference(
     action="sql_query",
 )
 CREATED_AT = datetime(2026, 8, 23, 9, 30, 0)
+
+
+def test_metric_definition_describes_percent_tolerance_and_trend_rule() -> None:
+    definition = MetricDefinition(
+        metric_key="overdue_rate",
+        display_name="Overdue rate",
+        unit="ratio",
+        better_direction=BetterDirection.LOWER,
+        absolute_tolerance=0.00005,
+        significant_change=0.01,
+    )
+
+    assert definition.better_direction == BetterDirection.LOWER
+    assert definition.significant_change == 0.01
+
+
+def test_verification_result_keeps_machine_readable_failure_details() -> None:
+    result = ClaimVerificationResult(
+        claim_id="claim-rate",
+        status="insufficient_evidence",
+        verification_method="business_rule",
+        evidence_artifact_ids=[],
+        verifier_name="trend-rule",
+        verifier_version="1",
+        reason_code="INSUFFICIENT_RULE",
+        details={"metric_key": "overdue_rate"},
+        latency_ms=7,
+    )
+
+    assert result.reason_code == "INSUFFICIENT_RULE"
+    assert result.latency_ms == 7
 
 
 def test_sql_artifact_preserves_executed_query_result() -> None:
