@@ -145,3 +145,18 @@ def test_exhausted_concurrent_save_returns_stable_conflict(monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["err_code"] == "REPORT_WRITE_CONFLICT"
+
+
+def test_html_preview_is_owner_scoped():
+    client = _client()
+    saved = _save(client)
+    run_id = saved["run_id"]
+
+    preview = client.get(f"{PREFIX}/report-1/runs/{run_id}/preview")
+
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("text/html")
+    assert preview.headers["content-security-policy"].startswith("default-src 'none'")
+    assert 'data-block-id="metric-gmv"' in preview.text
+    bob = _client("bob")
+    assert bob.get(f"{PREFIX}/report-1/runs/{run_id}/preview").status_code == 404

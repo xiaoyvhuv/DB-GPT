@@ -98,7 +98,7 @@ def test_assemble_and_save_builds_v2_document_from_captured_artifacts():
     assert document.schema_version == 2
     assert document.report_id == "report-conv-1"
     assert document.artifacts[0].artifact_id == "sql-total"
-    assert document.sections[1].blocks[0].value == 42
+    assert document.sections[0].blocks[0].value == 42
     assert dao.save.call_args.kwargs == {
         "owner_id": "alice",
         "trigger_type": "interactive",

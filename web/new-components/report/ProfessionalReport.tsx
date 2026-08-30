@@ -1,5 +1,6 @@
 import { ColumnAnalysis, DatasetAnalysisSummary } from '@/new-components/analysis';
 import AdvancedChart, { ChartType, createChartConfig } from '@/new-components/charts';
+import { exportReportElement } from '@/utils/report-export';
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -147,7 +148,7 @@ export const ProfessionalReport: React.FC<ProfessionalReportProps> = ({
       if (onExport) {
         onExport(format);
       } else {
-        await exportReport(format);
+        if (reportRef.current) await exportReportElement(reportRef.current, title, format);
       }
       message.success(`Report exported as ${format.toUpperCase()}`);
     } catch (error) {
@@ -155,40 +156,6 @@ export const ProfessionalReport: React.FC<ProfessionalReportProps> = ({
     } finally {
       setExporting(false);
       setExportFormat(null);
-    }
-  };
-
-  const exportReport = async (format: 'pdf' | 'png') => {
-    if (!reportRef.current) return;
-
-    const html2canvas = (await import('html2canvas')).default;
-
-    const canvas = await html2canvas(reportRef.current, {
-      scale: 2,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: '#ffffff',
-    });
-
-    if (format === 'png') {
-      const link = document.createElement('a');
-      link.download = `${title.replace(/\s+/g, '_')}_report.png`;
-      link.href = canvas.toDataURL('image/png');
-      link.click();
-      return;
-    }
-
-    if (format === 'pdf') {
-      const { jsPDF } = await import('jspdf');
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF({
-        orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
-        unit: 'px',
-        format: [canvas.width, canvas.height],
-      });
-      pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-      pdf.save(`${title.replace(/\s+/g, '_')}_report.pdf`);
-      return;
     }
   };
 

@@ -219,6 +219,12 @@ class InMemoryArtifactSink:
         """Return correlation metadata for this sink."""
         return self._context
 
+    @property
+    def artifact_count(self) -> int:
+        """Return the current count without copying artifact payloads."""
+        with self._lock:
+            return len(self._artifacts)
+
     def record(self, artifact: Artifact) -> None:
         """Record a defensive copy after ownership and uniqueness checks."""
         payload = artifact.model_dump(mode="python", warnings="none")

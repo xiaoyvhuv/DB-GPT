@@ -241,3 +241,35 @@ test('bounds citation count and excerpt size at the compatibility seam', () => {
     12_000,
   );
 });
+
+test('normalizes exact report coordinates from live and persisted final answers', () => {
+  assert.deepEqual(
+    decodeAgentFinalAnswer({
+      content: 'answer',
+      report_id: ' report-123 ',
+      report_run_id: ' turn-123 ',
+    }),
+    {
+      content: 'answer',
+      citations: [],
+      reportId: 'report-123',
+      reportRunId: 'turn-123',
+    },
+  );
+  assert.deepEqual(
+    decodeAgentHistoryAnswer({
+      version: 2,
+      protocol_version: 2,
+      type: 'react-agent',
+      final_content: 'answer',
+      report_id: 'report-456',
+      report_run_id: 'turn-456',
+    }),
+    {
+      content: 'answer',
+      citations: [],
+      reportId: 'report-456',
+      reportRunId: 'turn-456',
+    },
+  );
+});

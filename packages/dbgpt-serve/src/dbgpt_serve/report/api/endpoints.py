@@ -3,7 +3,7 @@
 from typing import Callable, List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -14,6 +14,7 @@ from dbgpt_serve.utils.auth import UserRequest, get_user_from_headers
 
 from ..domain import ReportWriteConflictError
 from ..models.models import MAX_OWNER_ID_LENGTH
+from ..rendering import render_report_html
 from ..service import (
     ReportBlockNotFoundError,
     ReportNotFoundError,
@@ -171,6 +172,32 @@ async def get_report_run(
 
 
 @router.get(
+    "/{report_id}/runs/{run_id}/preview",
+    response_class=HTMLResponse,
+)
+async def preview_report_run(
+    report_id: str,
+    run_id: str,
+    owner_id: str = Depends(get_authenticated_owner),
+    service: ReportService = Depends(get_report_service),
+):
+    """Render one owner-scoped immutable revision as script-free HTML."""
+    record = await _call_service(service.get_run, owner_id, report_id, run_id)
+    policy = (
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    )
+    return HTMLResponse(
+        render_report_html(record.document),
+        headers={
+            "Content-Security-Policy": policy,
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get(
     "/{report_id}/runs/{run_id}/blocks/{block_id}/evidence",
     response_model=Result[List[ReportEvidenceResponse]],
 )
@@ -178,12 +205,18 @@ async def get_report_block_evidence(
     report_id: str,
     run_id: str,
     block_id: str,
+    limit: int = Query(50, ge=1, le=200),
     owner_id: str = Depends(get_authenticated_owner),
     service: ReportService = Depends(get_report_service),
 ):
     """Read ordered evidence bindings and their referenced artifacts."""
     details = await _call_service(
-        service.get_block_evidence, owner_id, report_id, run_id, block_id
+        service.get_block_evidence,
+        owner_id,
+        report_id,
+        run_id,
+        block_id,
+        limit=limit,
     )
     return Result.succ([ReportEvidenceResponse.from_domain(item) for item in details])
 

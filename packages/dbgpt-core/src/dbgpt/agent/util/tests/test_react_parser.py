@@ -465,6 +465,27 @@ Action Input: {"operation": "add", "a": 2, "b": 2}
         assert steps[0].thought == "I should calculate 2+2."
         assert steps[0].action == "calculator"
 
+    def test_parsing_with_markdown_emphasized_protocol_labels(self):
+        """Accept protocol labels emphasized by OpenAI-compatible models."""
+        parser = ReActOutputParser()
+        text = """**Thought**: I should create the task plan first.
+**Action Intention**: Create plan
+**Action Reason**: This is a multi-step task.
+**Action**: todowrite
+**Action Input**: {"todos": [{"content": "Analyze GMV", "status": "in_progress", "priority": "high"}]}"""
+
+        steps = parser.parse(text)
+
+        assert len(steps) == 1
+        assert steps[0].thought == "I should create the task plan first."
+        assert steps[0].action_intention == "Create plan"
+        assert steps[0].action == "todowrite"
+        assert steps[0].action_input == {
+            "todos": [
+                {"content": "Analyze GMV", "status": "in_progress", "priority": "high"}
+            ]
+        }
+
     def test_parse_current_step_uses_first_action_for_multi_round_output(self):
         """Use the first action when a model emits multiple ReAct rounds at once."""
         parser = ReActOutputParser()

@@ -59,6 +59,30 @@ def test_history_failure_does_not_drop_final_or_done(caplog) -> None:
     assert "Failed to persist ReAct agent history" in caplog.text
 
 
+def test_report_link_is_persisted_and_emitted_with_terminal_answer() -> None:
+    storage = MagicMock()
+    answer = AgentFinalAnswer(
+        content="answer", report_id="report-123", report_run_id="turn-123"
+    )
+    history = agentic_data_api._build_react_history_payload(
+        final_content=answer.content,
+        steps=[],
+        task_plan=[],
+        generated_images=[],
+        sub_agents={},
+        input_files=[],
+        report_id=answer.report_id,
+        report_run_id=answer.report_run_id,
+    )
+
+    events = agentic_data_api._react_terminal_events(storage, history, answer)
+
+    assert json.loads(history)["report_id"] == "report-123"
+    assert json.loads(history)["report_run_id"] == "turn-123"
+    assert _decode_sse_event(events[0])["report_id"] == "report-123"
+    assert _decode_sse_event(events[0])["report_run_id"] == "turn-123"
+
+
 @pytest.mark.asyncio
 async def test_agent_operation_binds_and_restores_turn_artifact_sink() -> None:
     sink = InMemoryArtifactSink(
@@ -76,6 +100,46 @@ async def test_agent_operation_binds_and_restores_turn_artifact_sink() -> None:
 
     assert result == "done"
     assert get_current_artifact_sink() is None
+
+
+def test_subagent_sql_step_is_captured_as_tabular_artifact() -> None:
+    """Parallel sub-agent steps must reach the same report sink as lead tools."""
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+
+    agentic_data_api._capture_subagent_step_artifact(
+        sink,
+        {
+            "type": "agent.step",
+            "agent_id": "sub_d1_0",
+            "batch_id": 1,
+            "round": 2,
+            "action": "sql_query",
+            "intention": "Count orders by month",
+            "sql": "SELECT month, COUNT(*) AS orders FROM orders GROUP BY month",
+            "chunks": [
+                {
+                    "output_type": "markdown",
+                    "content": "| month | orders |\n| --- | --- |\n| 2024-01 | 42 |",
+                }
+            ],
+        },
+    )
+
+    artifacts = sink.snapshot()
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert isinstance(artifact, SQLArtifact)
+    assert artifact.execution.step_id == "sub_d1_0:2"
+    assert artifact.execution.action == "sql_query"
+    assert artifact.sql == "SELECT month, COUNT(*) AS orders FROM orders GROUP BY month"
+    assert artifact.columns == ["month", "orders"]
+    assert artifact.row_count == 1
+    assert artifact.result.inline == {
+        "columns": ["month", "orders"],
+        "rows": [["2024-01", 42]],
+    }
 
 
 @pytest.mark.asyncio
@@ -134,6 +198,7 @@ async def test_completed_turn_assembles_and_persists_captured_report(
     assert kwargs["report_id"] == ("report-36524fd8f6747fc2712506d01fee0e18b48cd626")
     assert kwargs["title"] == "Analyze total sales"
     assert kwargs["conv_uid"] == "conv-1"
+    assert kwargs["run_id"] == "turn-1"
     assert kwargs["artifacts"][0].artifact_id == "sql-total"
     assert "supporting_artifact_ids" not in kwargs
     assert kwargs["metadata"] == {

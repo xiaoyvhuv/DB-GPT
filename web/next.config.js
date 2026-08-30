@@ -1,14 +1,12 @@
 /** @type {import('next').NextConfig} */
-const CopyPlugin = require("copy-webpack-plugin");
-const MonacoWebpackPlugin = require("monaco-editor-webpack-plugin");
-const path = require("path");
+const CopyPlugin = require('copy-webpack-plugin');
+const MonacoWebpackPlugin = require('monaco-editor-webpack-plugin');
+const path = require('path');
+
 const nextConfig = {
-  experimental: {
-    esmExternals: "loose",
-  },
-  typescript: {
-    ignoreBuildErrors: true,
-  },
+  experimental: { esmExternals: 'loose' },
+  typescript: { ignoreBuildErrors: true },
+  staticPageGenerationTimeout: 600,
   env: {
     API_BASE_URL: process.env.API_BASE_URL,
     GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
@@ -21,43 +19,21 @@ const nextConfig = {
   images: { unoptimized: true },
   skipTrailingSlashRedirect: true,
   webpack: (config, { isServer }) => {
+    // Limit worker concurrency on Windows to avoid exhausting file handles.
+    config.parallelism = 1;
     config.resolve.fallback = { fs: false };
     if (!isServer) {
       config.plugins.push(
-        new CopyPlugin({
-          patterns: [
-            {
-              from: path.join(
-                __dirname,
-                "node_modules/@oceanbase-odc/monaco-plugin-ob/worker-dist/"
-              ),
-              to: "static/ob-workers",
-            },
-          ],
-        })
+        new CopyPlugin({ patterns: [{ from: path.join(__dirname, 'node_modules/@oceanbase-odc/monaco-plugin-ob/worker-dist/'), to: 'static/ob-workers' }] }),
       );
-      // 添加 monaco-editor-webpack-plugin 插件
-      config.plugins.push(
-        new MonacoWebpackPlugin({
-          // 你可以在这里配置插件的选项，例如：
-          languages: ["sql"],
-          filename: "static/[name].worker.js",
-        })
-      );
+      config.plugins.push(new MonacoWebpackPlugin({ languages: ['sql'], filename: 'static/[name].worker.js' }));
     }
     return config;
   },
 };
 
-const withTM = require("next-transpile-modules")([
-  "@berryv/g2-react",
-  "@antv/g2",
-  "react-syntax-highlighter",
-  "@antv/g6",
-  "@antv/graphin",
-  "@antv/gpt-vis",
+const withTM = require('next-transpile-modules')([
+  '@berryv/g2-react', '@antv/g2', 'react-syntax-highlighter', '@antv/g6', '@antv/graphin', '@antv/gpt-vis',
 ]);
 
-module.exports = withTM({
-  ...nextConfig,
-});
+module.exports = withTM({ ...nextConfig });
