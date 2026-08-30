@@ -89,6 +89,7 @@ export * from './chat';
 export * from './evaluate';
 export * from './flow';
 export * from './knowledge';
+export * from './observability';
 export * from './prompt';
 export * from './report';
 export * from './request';
