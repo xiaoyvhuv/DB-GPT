@@ -1,5 +1,6 @@
 import { ChatContext, ChatContextProvider } from '@/app/chat-context';
 import SideBar from '@/components/layout/side-bar';
+import { NewTaskProvider } from '@/modules/new-task';
 import FloatHelper from '@/new-components/layout/FloatHelper';
 import { STORAGE_LANG_KEY, STORAGE_USERINFO_KEY, STORAGE_USERINFO_VALID_TIME_KEY } from '@/utils/constants/index';
 import { App, ConfigProvider, MappingAlgorithm, theme } from 'antd';
@@ -84,11 +85,13 @@ function LayoutWrapper({ children }: { children: React.ReactNode }) {
 export default function MainAppShell({ Component, pageProps }: AppProps) {
   return (
     <ChatContextProvider>
-      <CssWrapper>
-        <LayoutWrapper>
-          <Component {...pageProps} />
-        </LayoutWrapper>
-      </CssWrapper>
+      <NewTaskProvider>
+        <CssWrapper>
+          <LayoutWrapper>
+            <Component {...pageProps} />
+          </LayoutWrapper>
+        </CssWrapper>
+      </NewTaskProvider>
     </ChatContextProvider>
   );
 }

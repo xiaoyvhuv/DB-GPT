@@ -1,6 +1,7 @@
 import type { AppProps } from 'next/app';
 import dynamic from 'next/dynamic';
 import React from 'react';
+
 import '../nprogress.css';
 import '../styles/globals.css';
 
