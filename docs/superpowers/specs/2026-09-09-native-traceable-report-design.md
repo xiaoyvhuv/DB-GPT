@@ -43,13 +43,14 @@
 1. 扩展原生 `ChartAction` 的 chart artifact 捕获：从 `vis-db-chart` view 中解析并
    保存结构化 spec（`renderer`、`type`、`title`、`describe`、`data`、`sql`），而不是
    仅保存 `display_type` 与一段协议文本。
-2. 在正常数据库分析流程接入 `ChartAction`，取代新增的平行 `native_chart` 工具；图表
-   类型是执行 action 的结构化参数，不是用户提示词中的硬约束。
+2. 在正常数据库分析流程以一个薄 `chart_query` 资源适配器接入 `ChartAction`：适配器仅将
+   当前连接器包装为 `RDBMSConnectorResource` 并调用原生 action，不重新实现 SQL、图表
+   spec 或 artifact 捕获。图表类型是 action 的结构化参数，不是用户提示词中的硬约束。
 3. `ReportAssembler` 在报告生成时把成功的图表 artifact 建为 `ChartBlock`，并递归带入
    SQL/Python/Reference 上游证据。指标、表格和结论仍只绑定其实际支持 artifact。
 4. 删除 agentic 数据入口中关于“必须 native_chart”和 HTML 图表 placeholder 的提示词；
-   删除临时 `native_chart` 工具及其专用测试。保留 HTML 完整性和对象级证据验证，仅用
-   于明确选择 HTML/skill 模板的交付。
+   删除临时 `native_chart` 实现并以 `chart_query` 适配器替代。保留 HTML 完整性和对象级
+   证据验证，仅用于明确选择 HTML/skill 模板的交付。
 
 ## 前端改动
 
