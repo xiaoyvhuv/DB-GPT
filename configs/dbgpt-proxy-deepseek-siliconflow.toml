@@ -1,0 +1,44 @@
+[system]
+language = "${env:DBGPT_LANG:-zh}"
+api_keys = []
+encrypt_key = "your_secret_key"
+
+[service.web]
+host = "0.0.0.0"
+port = 5670
+cors_allowed_origins = "${env:DBGPT_CORS_ALLOWED_ORIGINS:-*}"
+
+[service.web.agent_context]
+max_context_tokens = 0
+reserved_tokens = 4096
+min_keep_recent_rounds = 6
+max_observation_age_rounds = 12
+truncated_observation_max_chars = 1000
+min_keep_tokens = 12000
+
+[service.web.database]
+type = "sqlite"
+path = "pilot/meta_data/dbgpt.db"
+
+[service.model.worker]
+host = "127.0.0.1"
+
+[rag.storage]
+[rag.storage.vector]
+type = "chroma"
+persist_path = "pilot/data"
+
+[models]
+default_embedding = "Qwen/Qwen3-Embedding-8B"
+
+[[models.llms]]
+name = "deepseek-flash"
+provider = "proxy/openai"
+api_base = "https://api.deepseek.com/v1"
+api_key = "${env:DEEPSEEK_API_KEY}"
+
+[[models.embeddings]]
+name = "Qwen/Qwen3-Embedding-8B"
+provider = "proxy/openai"
+api_url = "https://api.siliconflow.cn/v1/embeddings"
+api_key = "${env:SILICONFLOW_API_KEY}"

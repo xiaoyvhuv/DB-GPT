@@ -22,6 +22,12 @@ persist_path = "pilot/data"
 
 # Model Configurations
 [models]
+[[models.embeddings]]
+name = "Qwen/Qwen3-Embedding-8B"
+provider = "proxy/openai"
+api_url = "https://api.siliconflow.cn/v1/embeddings"
+api_key = "${env:SILICONFLOW_API_KEY}"
+
 [[models.llms]]
 name = "deepseek-v4-pro"
 # name = "deepseek-reasoner"
