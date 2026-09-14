@@ -1071,6 +1071,7 @@ const ManusLeftPanel: React.FC<ManusLeftPanelProps> = ({
   onReportClick,
 }) => {
   const { t } = useTranslation();
+  const isTaskPlanComplete = !taskPlan?.length || taskPlan.every(task => task.status === 'completed' || task.status === 'cancelled');
   const handleStepClick = useCallback(
     (stepId: string, sectionId: string) => {
       onStepClick?.(stepId, sectionId);
@@ -1308,10 +1309,12 @@ const ManusLeftPanel: React.FC<ManusLeftPanelProps> = ({
               )}
             </div>
 
-            <div className='flex items-center gap-1.5 mt-5'>
-              <CheckOutlined className='text-xs text-emerald-500' />
-              <span className='text-sm text-emerald-600 dark:text-emerald-400 font-medium'>{t('task_completed')}</span>
-            </div>
+            {isTaskPlanComplete && (
+              <div className='flex items-center gap-1.5 mt-5'>
+                <CheckOutlined className='text-xs text-emerald-500' />
+                <span className='text-sm text-emerald-600 dark:text-emerald-400 font-medium'>{t('task_completed')}</span>
+              </div>
+            )}
           </div>
         )}
       </div>

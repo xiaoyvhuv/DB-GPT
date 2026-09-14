@@ -497,9 +497,9 @@ const EXAMPLE_CARDS = [
     title: 'Olist 巴西电商经营诊断',
     description: '调用 DeepSeek 分析真实 Olist 数据库，生成可追溯经营与履约报告',
     query:
-      '请基于当前连接的 Olist 电商数据库完成一次新的经营与履约诊断：只统计已交付订单，分析 2017-01-01 至 2018-08-31 的 GMV、订单量、客单价、运费占比和月度趋势；比较主要商品品类及客户所在州的表现；分析配送时长、逾期交付与客户评分之间的关系；分析支付方式和分期情况；最后给出三条可执行的经营建议。执行 SQL、计算和图表时，必须保留实际产物，供报告的指标、图表和结论绑定证据。',
+      '请基于 Olist 电商数据库，分析 2017 年 1 月至 2018 年 8 月已交付订单的经营表现。请先说明本次 GMV、订单量、客单价和运费占比采用的统计口径，再分析这些指标的月度趋势、核心品类和主要客户州的差异；结合配送时效与评价表现，最后给出三条可执行的经营建议。',
     dbName: 'Olist_Ecommerce',
-    modelName: 'deepseek-chat',
+    modelName: 'deepseek-flash',
     color: 'from-rose-500/10 to-orange-500/10',
     borderColor: 'border-rose-200/60 dark:border-rose-800/40',
     iconBg: 'bg-rose-100 dark:bg-rose-900/40',
@@ -563,7 +563,7 @@ const EXAMPLE_CARDS = [
 const Playground: NextPage = () => {
   const router = useRouter();
   const { t } = useTranslation();
-  const { model, setModel } = useContext(ChatContext);
+  const { model, modelList, setModel } = useContext(ChatContext);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const exampleRunInFlightRef = useRef(false);
@@ -1911,7 +1911,19 @@ const Playground: NextPage = () => {
   ) => {
     const effectiveSkill = overrideSkill !== undefined ? overrideSkill : selectedSkill;
     const effectiveDb = overrideDb !== undefined ? overrideDb : selectedDb;
-    const effectiveModel = overrideModel || model;
+    // A browser tab can retain a model name from an older backend config.
+    // Never send that stale name when the server has already supplied its
+    // currently usable model list.
+    // Example cards and restored browser sessions can contain models that no
+    // longer exist after a backend configuration change.  Only send a model
+    // that the server currently advertises; prefer the configured local
+    // DeepSeek model while the model list is still loading.
+    const requestedModel = overrideModel || model;
+    const effectiveModel = modelList.includes(requestedModel)
+      ? requestedModel
+      : modelList.includes('deepseek-flash')
+        ? 'deepseek-flash'
+        : modelList[0] || 'deepseek-flash';
     if (
       (!inputQuery.trim() && !hasSessionFileDrafts && !hasLegacyFile && !explicitLegacyFile) ||
       loading ||
@@ -2089,7 +2101,10 @@ const Playground: NextPage = () => {
       model_name: effectiveModel,
       select_param: selectParam,
       temperature: 0.6,
-      max_new_tokens: 4000,
+      // A report agent must emit both ReAct actions and a complete bound HTML
+      // document.  Four thousand tokens truncated the repair turn after a
+      // binding validation failure, leaving the report without a presentation.
+      max_new_tokens: 8000,
       ext_info: extInfo,
     };
 
@@ -2105,7 +2120,7 @@ const Playground: NextPage = () => {
           model_name: effectiveModel,
           user_input: finalQuery,
           temperature: 0.6,
-          max_new_tokens: 4000,
+          max_new_tokens: 8000,
           select_param: selectParam,
           ext_info: extInfo,
         }),

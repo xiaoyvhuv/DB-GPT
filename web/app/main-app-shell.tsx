@@ -1,4 +1,5 @@
 import { ChatContext, ChatContextProvider } from '@/app/chat-context';
+import i18n from '@/app/i18n';
 import SideBar from '@/components/layout/side-bar';
 import { NewTaskProvider } from '@/modules/new-task';
 import FloatHelper from '@/new-components/layout/FloatHelper';
@@ -11,7 +12,6 @@ import type { AppProps } from 'next/app';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import React, { useContext, useEffect, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 
 const antdDarkTheme: MappingAlgorithm = (seedToken, mapToken) => ({
   ...theme.darkAlgorithm(seedToken, mapToken),
@@ -22,7 +22,6 @@ const antdDarkTheme: MappingAlgorithm = (seedToken, mapToken) => ({
 
 function CssWrapper({ children }: { children: React.ReactElement }) {
   const { mode } = useContext(ChatContext);
-  const { i18n } = useTranslation();
 
   useEffect(() => {
     if (!mode) return;
@@ -39,9 +38,15 @@ function CssWrapper({ children }: { children: React.ReactElement }) {
 
 function LayoutWrapper({ children }: { children: React.ReactNode }) {
   const { isMenuExpand, mode } = useContext(ChatContext);
-  const { i18n } = useTranslation();
   const [isLogin, setIsLogin] = useState(false);
+  const [language, setLanguage] = useState(i18n.language || 'zh');
   const router = useRouter();
+
+  useEffect(() => {
+    const updateLanguage = (nextLanguage: string) => setLanguage(nextLanguage);
+    i18n.on('languageChanged', updateLanguage);
+    return () => i18n.off('languageChanged', updateLanguage);
+  }, []);
 
   useEffect(() => {
     const user = { user_channel: 'dbgpt', user_no: '001', nick_name: 'dbgpt' };
@@ -74,7 +79,7 @@ function LayoutWrapper({ children }: { children: React.ReactNode }) {
 
   return (
     <ConfigProvider
-      locale={i18n.language === 'en' ? enUS : zhCN}
+      locale={language === 'en' ? enUS : zhCN}
       theme={{ token: { colorPrimary: '#0C75FC', borderRadius: 4 }, algorithm: mode === 'dark' ? antdDarkTheme : undefined }}
     >
       <App>{content}</App>

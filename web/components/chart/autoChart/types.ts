@@ -16,6 +16,8 @@ export type AutoChartProps = {
   };
   /** Customize rules. */
   ruleConfig?: RuleConfig;
+  /** Hide chat-only recommendation, chart switching and download controls. */
+  showControls?: boolean;
 };
 
 export type ChartKnowledge = PureChartKnowledge & { toSpec?: any };

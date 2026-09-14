@@ -8,7 +8,9 @@ const nextConfig = {
   typescript: { ignoreBuildErrors: true },
   staticPageGenerationTimeout: 600,
   env: {
-    API_BASE_URL: process.env.API_BASE_URL,
+    // Local development uses the DB-GPT webserver. Deployments can override
+    // this through API_BASE_URL without changing the client bundle contract.
+    API_BASE_URL: process.env.API_BASE_URL || 'http://127.0.0.1:5670',
     GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
     GET_USER_URL: process.env.GET_USER_URL,

@@ -1,5 +1,44 @@
 export type ReportBlockType = 'metric' | 'table' | 'chart' | 'insight' | 'text';
 export type ArtifactType = 'sql' | 'python' | 'chart' | 'reference';
+export type ClaimVerificationStatus =
+  | 'verified'
+  | 'partially_supported'
+  | 'unsupported'
+  | 'insufficient_evidence'
+  | 'contradicted'
+  | 'unverifiable'
+  | 'error';
+export type ClaimVerificationMethod =
+  | 'exact_match'
+  | 'recompute'
+  | 'comparison_rule'
+  | 'trend_rule'
+  | 'business_rule'
+  | 'time_series_rule'
+  | 'ranking_rule'
+  | 'nli'
+  | 'minicheck'
+  | 'llm_judge';
+
+export interface ClaimVerificationResult {
+  status: ClaimVerificationStatus;
+  verification_method?: ClaimVerificationMethod;
+  support_score?: number;
+  evidence_artifact_ids?: string[];
+  details?: Record<string, unknown>;
+}
+
+export interface ReportClaim {
+  claim_id: string;
+  claim_type?: string;
+  text: string;
+  normalized?: string;
+  verification?: ClaimVerificationResult;
+}
+
+export type ReportTextSegment =
+  | { type: 'text'; text: string }
+  | { type: 'claim'; segment_id: string; claim_id: string; text: string };
 
 export interface ArtifactContent {
   inline?: unknown;
@@ -31,6 +70,7 @@ export interface ReportArtifact {
   columns?: string[];
   row_count?: number;
   sql?: string;
+  database?: string;
   code?: string;
   language?: string;
   stdout?: string;
@@ -43,6 +83,12 @@ export interface ReportArtifact {
   uri?: string;
   locator?: Record<string, unknown>;
   excerpt?: string;
+}
+
+export interface ArtifactLineage {
+  source_id?: string;
+  source_name?: string;
+  tables?: string[];
 }
 
 export interface EvidenceReference {
@@ -65,10 +111,12 @@ export interface ReportBlock {
   data_artifact_id?: string;
   chart_artifact_id?: string;
   description?: string;
+  claims?: ReportClaim[];
+  segments?: ReportTextSegment[];
 }
 
 export interface ReportDocument {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   report_id: string;
   title: string;
   conv_uid: string;

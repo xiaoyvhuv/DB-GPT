@@ -15,7 +15,7 @@ import { AutoChartProps, ChartType, CustomAdvisorConfig, CustomChart, Specificat
 const { Option } = Select;
 
 export const AutoChart = (props: AutoChartProps) => {
-  const { data: originalData, chartType, scopeOfCharts, ruleConfig } = props;
+  const { data: originalData, chartType, scopeOfCharts, ruleConfig, showControls = true } = props;
   // 处理空值数据 (为'-'的数据)
   const data = processNilData(originalData) as Datum[];
   const { mode } = useContext(ChatContext);
@@ -125,6 +125,7 @@ export const AutoChart = (props: AutoChartProps) => {
   }, [advices, mode, renderChartType]);
 
   if (renderChartType) {
+    if (!showControls) return <div className='flex'>{visComponent}</div>;
     return (
       <div>
         <Row justify='space-between' className='mb-2'>
