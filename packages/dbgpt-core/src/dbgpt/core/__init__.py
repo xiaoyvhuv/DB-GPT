@@ -59,6 +59,7 @@ from dbgpt.core.interface.prompt import (  # noqa: F401
 from dbgpt.core.interface.report import (  # noqa: F401
     Artifact,
     ArtifactContent,
+    ArtifactTiming,
     ChartArtifact,
     ChartBlock,
     Claim,
@@ -80,6 +81,7 @@ from dbgpt.core.interface.report import (  # noqa: F401
     TableBlock,
     TextBlock,
     TextSegment,
+    TimingMeasurementState,
     VerificationMethod,
     VerificationStatus,
 )

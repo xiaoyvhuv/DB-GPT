@@ -237,6 +237,18 @@ HTML 为兼容预览时，前端会把 `vis-db-chart` artifact 挂载到明确�
 
 `report-print.ts` 在打印前等待字体和动画帧完成，将 iframe 内的 canvas 序列化为 PNG，再克隆文档到打印窗口。这样避免 portal 挂载的图表在直接浏览器打印时丢失。
 
+### 8.5 统一耗时语义
+
+每个 artifact 可携带 `ArtifactTiming`，三个维度互不复用：
+
+| 维度 | 含义 | 采集位置 | 展示规则 |
+| --- | --- | --- | --- |
+| 服务端执行 | SQL 查询、Python 进程或 Chart spec 生成所花时间 | 后端工具/ChartAction | 兼容旧 `duration_ms`；图表明确标为“服务端图表规格生成” |
+| 派生产物处理 | 从上游执行结果派生文件、图片或中间产物的独立处理时间 | 产生派生 artifact 的工具 | 未单独计时则标为“已包含在上游执行中”或“未单独采集”，绝不复制 Python 耗时 |
+| 浏览器绘制 | 当前浏览器把原生图表挂载并完成两帧绘制的耗时 | `BrowserTimedNativeChart` | 仅是本次客户端渲染测量；未挂载或历史图表显示“未采集” |
+
+这三项在证据抽屉中分别显示。服务端不再把 `0 ms` 解释为整个图表渲染完成，浏览器测量也不会回写篡改已经持久化的服务端执行证据。
+
 ## 9. 运行配置
 
 模型代理配置示例：
@@ -289,6 +301,5 @@ node web/new-components/report/ReportViewRouting.test.js
 
 1. 完成从 HTML 兼容预览到 `ReportDocument` 原生块渲染的迁移，减少 iframe 对图表的特殊挂载逻辑。
 2. 补齐以 dependency graph 驱动的最小化刷新执行器，并将刷新状态、差异和失败范围呈现给用户。
-3. 为 SQL/Python/Chart/KB 建立统一的执行耗时定义，分别展示服务端执行、派生产物和浏览器绘制。
-4. 将 Olist E2E、图表 PDF 和知识库 evidence 纳入 CI 浏览器回归。
-5. 将密钥配置迁移到标准密钥管理方案，并把本地 `.env`、上传内容和临时产物纳入默认忽略规则。
+3. 将 Olist E2E、图表 PDF 和知识库 evidence 纳入 CI 浏览器回归。
+4. 将密钥配置迁移到标准密钥管理方案，并把本地 `.env`、上传内容和临时产物纳入默认忽略规则。

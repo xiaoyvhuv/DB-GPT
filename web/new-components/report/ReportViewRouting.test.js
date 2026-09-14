@@ -118,6 +118,16 @@ assert.match(
   /服务端图表规格生成 < 1 ms；浏览器绘制未采集/,
   'a sub-millisecond chart-spec preparation must not be presented as a zero-millisecond chart render',
 );
+assert.match(
+  htmlRenderer,
+  /服务端执行[\s\S]*派生产物处理[\s\S]*浏览器绘制/,
+  'the evidence drawer must show the three timing dimensions separately',
+);
+assert.match(
+  htmlRenderer,
+  /browserRenderMsByArtifactId/,
+  'native chart paint timing must be recorded in the browser instead of being inferred from server timing',
+);
 
 const claimGraph = fs.readFileSync(path.join(__dirname, 'ClaimEvidenceGraph.tsx'), 'utf8');
 assert.match(

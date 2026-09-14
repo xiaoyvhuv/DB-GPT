@@ -59,6 +59,10 @@ def test_sql_tool_captures_complete_result_before_display_truncation() -> None:
     assert isinstance(artifact, SQLArtifact)
     assert artifact.status == "succeeded"
     assert artifact.duration_ms is not None
+    assert artifact.timing is not None
+    assert artifact.timing.server_execution_ms == artifact.duration_ms
+    assert artifact.timing.derivative_processing_state == "not_applicable"
+    assert artifact.timing.browser_render_state == "not_applicable"
     assert artifact.database == "sales"
     assert artifact.columns == ["id", "payload"]
     assert artifact.row_count == 55
@@ -248,6 +252,8 @@ async def test_python_tool_captures_full_output_hash_before_display_truncation(
     assert isinstance(artifact, PythonArtifact)
     assert artifact.status == "succeeded"
     assert artifact.exit_code == 0
+    assert artifact.timing is not None
+    assert artifact.timing.server_execution_ms == artifact.duration_ms
     assert artifact.stdout == stdout.decode()[:50_000]
     assert artifact.stderr == "warning"
     assert artifact.metadata["output_summary"]["stdout_chars"] == len(stdout)
