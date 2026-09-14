@@ -4,9 +4,16 @@ import fnmatch
 import json
 import logging
 import re
+import time
+from itertools import islice
 from typing import Annotated, List, Optional
 
 from dbgpt.agent.resource.tool.base import tool
+from dbgpt.core.interface.report_capture import (
+    capture_reference_artifact,
+    get_current_artifact_sink,
+    sha256_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +106,8 @@ async def kb_ls(
         return f"No files in knowledge space {knowledge_id}"
     target = path.rstrip("/")
     prefix = (target + "/") if target else ""
-    dirs, files = {}, []
+    dirs: dict[str, int] = {}
+    files = []
     for f in all_files:
         fp = f["file_path"]
         if not fp.startswith(prefix):
@@ -119,7 +127,6 @@ async def kb_ls(
         entries.append(f"  {d}/\t({c} files)")
     for n, ft, lang in sorted(files):
         entries.append(f"  {n}\t{lang or ft or ''}")
-    total = len(entries)
     paged = entries[offset : offset + limit]
     display = target or "/"
     lines = [f"Directory: {display} ({len(files)} files, {len(dirs)} dirs)"] + paged
@@ -186,7 +193,6 @@ async def kb_ls_json(
     for f in sorted(files, key=lambda x: x["name"]):
         entries.append(f)
 
-    total = len(entries)
     paged = entries[offset : offset + limit]
 
     return {
@@ -247,6 +253,8 @@ async def kb_grep(
     limit: Annotated[int, "Max files"] = 20,
     offset: Annotated[int, "Pagination offset"] = 0,
 ) -> str:
+    capture_enabled = get_current_artifact_sink() is not None
+    started = time.perf_counter() if capture_enabled else None
     limit, offset = int(limit) or 20, int(offset) or 0
     chunk_dao, ChunkEntity = _get_chunk_dao()
     all_files = _get_all_file_paths(knowledge_id)
@@ -263,7 +271,7 @@ async def kb_grep(
         target_files[f["doc_id"]] = f
     if not target_files:
         return f"No files in scope '{path or file_pattern or 'repo'}'"
-    doc_matches = {}
+    doc_matches: dict[int, list[tuple[int, str]]] = {}
     fetch_limit = offset + limit
     for doc_id in target_files:
         if len(doc_matches) >= fetch_limit:
@@ -285,9 +293,49 @@ async def kb_grep(
                 doc_matches[doc_id] = []
             content = _CONTEXT_PREFIX_RE.sub("", chunk.content or "")
             start_line = chunk_meta.get("start_line", 1)
+            chunk_matches = []
             for i, line in enumerate(content.split("\n")):
                 if query.lower() in line.lower():
-                    doc_matches[doc_id].append((start_line + i, line.strip()[:120]))
+                    chunk_matches.append((start_line + i, line.strip()[:120]))
+            if chunk_matches:
+                doc_matches[doc_id].extend(chunk_matches)
+                if capture_enabled:
+                    file_info = target_files.get(doc_id) or {}
+                    chunk_id = str(
+                        getattr(chunk, "id", None)
+                        or chunk_meta.get("chunk_id")
+                        or f"{doc_id}-{chunk_meta.get('chunk_index', 0)}"
+                    )
+                    page = chunk_meta.get("page")
+                    if page is None:
+                        page = chunk_meta.get("page_number")
+                    capture_reference_artifact(
+                        reference_type="knowledge",
+                        source_id=chunk_id,
+                        action="knowledge.grep",
+                        duration_ms=max(
+                            0,
+                            int((time.perf_counter() - started) * 1000)
+                            if started is not None
+                            else 0,
+                        ),
+                        source_name=file_info.get("doc_name")
+                        or file_info.get("file_path")
+                        or chunk_id,
+                        uri=f"kb://{knowledge_id}/{doc_id}/{chunk_id}",
+                        locator={
+                            "knowledge_id": str(knowledge_id),
+                            "document_id": doc_id,
+                            "chunk_id": chunk_id,
+                            "chunk_index": chunk_meta.get("chunk_index"),
+                            "page": page,
+                            "path": file_info.get("file_path"),
+                            "start_line": start_line,
+                            "matched_lines": [line for line, _text in chunk_matches],
+                        },
+                        excerpt=content,
+                        metadata={"query_sha256": sha256_text(query)},
+                    )
     if not doc_matches:
         return f"No content matching '{query}' in '{path or file_pattern or 'repo'}'"
     all_doc_ids = list(doc_matches.keys())
@@ -317,6 +365,8 @@ async def kb_cat(
     start_line: Annotated[int, "Start line (1-based)"] = 1,
     end_line: Annotated[int, "End line, 0 = to end"] = 0,
 ) -> str:
+    capture_enabled = get_current_artifact_sink() is not None
+    started = time.perf_counter() if capture_enabled else None
     start_line, end_line = int(start_line) or 1, int(end_line) or 0
     file_info = _find_doc_by_file_path(knowledge_id, path)
     if not file_info:
@@ -359,5 +409,29 @@ async def kb_cat(
             result[:MAX_KB_CAT_CHARS]
             + f"\n\n... [Output truncated at {MAX_KB_CAT_CHARS} chars. "
             f"Use start_line/end_line to read specific sections]"
+        )
+    if capture_enabled:
+        document_id = file_info["doc_id"]
+        capture_reference_artifact(
+            reference_type="knowledge",
+            source_id=f"document-{document_id}-{start_idx + 1}-{end_idx}",
+            action="knowledge.cat",
+            duration_ms=max(
+                0,
+                int((time.perf_counter() - started) * 1000)
+                if started is not None
+                else 0,
+            ),
+            source_name=file_info.get("doc_name") or path,
+            uri=f"kb://{knowledge_id}/{document_id}",
+            locator={
+                "knowledge_id": str(knowledge_id),
+                "document_id": document_id,
+                "path": path,
+                "start_line": start_idx + 1,
+                "end_line": end_idx,
+            },
+            excerpt_parts=islice(full_lines, start_idx, end_idx),
+            excerpt_separator="\n",
         )
     return result

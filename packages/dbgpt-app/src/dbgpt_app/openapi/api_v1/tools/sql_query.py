@@ -1,12 +1,20 @@
 """sql_query tool — read-only SQL query against the selected database."""
 
 import json
+import time
 from typing import Any, Dict, Optional
 
 from dbgpt.agent.resource.tool.base import tool
 
+from .artifact_capture import capture_sql_execution, connector_database_name
 
-def make_sql_query(react_state: Dict[str, Any], database_connector: Optional[Any]):
+
+def make_sql_query(
+    react_state: Dict[str, Any],
+    database_connector: Optional[Any],
+    *,
+    max_output_chars: Optional[int] = 20_000,
+):
     @tool(
         description=(
             "对用户选择的数据库执行 SQL 查询（仅支持 SELECT）。"
@@ -56,9 +64,17 @@ def make_sql_query(react_state: Dict[str, Any], database_connector: Optional[Any
                     ensure_ascii=False,
                 )
 
+        started = time.perf_counter()
         try:
             result = database_connector.run(sql_stripped)
             if not result:
+                capture_sql_execution(
+                    sql=sql_stripped,
+                    database=connector_database_name(database_connector),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    columns=[],
+                    rows=[],
+                )
                 return json.dumps(
                     {
                         "chunks": [
@@ -72,6 +88,14 @@ def make_sql_query(react_state: Dict[str, Any], database_connector: Optional[Any
             col_names = [str(c[0]) if isinstance(c, tuple) else str(c) for c in columns]
             rows = result[1:]
 
+            capture_sql_execution(
+                sql=sql_stripped,
+                database=connector_database_name(database_connector),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                columns=col_names,
+                rows=rows,
+            )
+
             header = "| " + " | ".join(col_names) + " |"
             separator = "| " + " | ".join(["---"] * len(col_names)) + " |"
             md_rows = []
@@ -84,11 +108,10 @@ def make_sql_query(react_state: Dict[str, Any], database_connector: Optional[Any
             # Cap total output size so a single wide query can't blow out the
             # LLM context window. The full result remains available via the
             # ToolResultStorage persistence layer if it exceeds the threshold.
-            MAX_SQL_OUTPUT_CHARS = 20_000
-            if len(table) > MAX_SQL_OUTPUT_CHARS:
+            if max_output_chars is not None and len(table) > max_output_chars:
                 table = (
-                    table[:MAX_SQL_OUTPUT_CHARS]
-                    + f"\n\n... [Output truncated at {MAX_SQL_OUTPUT_CHARS} chars. "
+                    table[:max_output_chars]
+                    + f"\n\n... [Output truncated at {max_output_chars} chars. "
                     f"Total rows: {len(rows)}]"
                 )
 
@@ -97,6 +120,12 @@ def make_sql_query(react_state: Dict[str, Any], database_connector: Optional[Any
                 ensure_ascii=False,
             )
         except Exception as e:
+            capture_sql_execution(
+                sql=sql_stripped,
+                database=connector_database_name(database_connector),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                error=str(e) or type(e).__name__,
+            )
             return json.dumps(
                 {
                     "chunks": [
