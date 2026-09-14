@@ -6,10 +6,15 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
+from dbgpt.core.interface.evidence_packet import EvidenceHandle, EvidencePacket
+from dbgpt.core.interface.metric import BetterDirection, MetricDefinition
 from dbgpt.core.interface.report import (
     ArtifactContent,
     ChartArtifact,
     ChartBlock,
+    Claim,
+    ClaimSegment,
+    ClaimVerificationResult,
     EvidenceReference,
     ExecutionReference,
     InsightBlock,
@@ -20,6 +25,7 @@ from dbgpt.core.interface.report import (
     SQLArtifact,
     TableBlock,
     TextBlock,
+    TextSegment,
 )
 
 EXECUTION = ExecutionReference(
@@ -31,6 +37,37 @@ EXECUTION = ExecutionReference(
     action="sql_query",
 )
 CREATED_AT = datetime(2026, 8, 23, 9, 30, 0)
+
+
+def test_metric_definition_describes_percent_tolerance_and_trend_rule() -> None:
+    definition = MetricDefinition(
+        metric_key="overdue_rate",
+        display_name="Overdue rate",
+        unit="ratio",
+        better_direction=BetterDirection.LOWER,
+        absolute_tolerance=0.00005,
+        significant_change=0.01,
+    )
+
+    assert definition.better_direction == BetterDirection.LOWER
+    assert definition.significant_change == 0.01
+
+
+def test_verification_result_keeps_machine_readable_failure_details() -> None:
+    result = ClaimVerificationResult(
+        claim_id="claim-rate",
+        status="insufficient_evidence",
+        verification_method="business_rule",
+        evidence_artifact_ids=[],
+        verifier_name="trend-rule",
+        verifier_version="1",
+        reason_code="INSUFFICIENT_RULE",
+        details={"metric_key": "overdue_rate"},
+        latency_ms=7,
+    )
+
+    assert result.reason_code == "INSUFFICIENT_RULE"
+    assert result.latency_ms == 7
 
 
 def test_sql_artifact_preserves_executed_query_result() -> None:
@@ -300,6 +337,173 @@ def _valid_v2_report_payload() -> dict:
         artifact["status"] = "succeeded"
         artifact["duration_ms"] = 1
     return payload
+
+
+def _valid_v3_report_payload() -> dict:
+    payload = _valid_v2_report_payload()
+    payload["schema_version"] = 3
+    insight = payload["sections"][0]["blocks"][3]
+    insight["content"] = "Overdue rate is 8.13%, and fulfilment improved."
+    insight["segments"] = [
+        {"type": "text", "text": "Overdue rate is "},
+        {
+            "type": "claim",
+            "segment_id": "segment-overdue",
+            "claim_id": "claim-overdue",
+            "text": "8.13%",
+        },
+        {"type": "text", "text": ", and "},
+        {
+            "type": "claim",
+            "segment_id": "segment-fulfilment",
+            "claim_id": "claim-fulfilment",
+            "text": "fulfilment improved",
+        },
+        {"type": "text", "text": "."},
+    ]
+    insight["claims"] = [
+        {
+            "claim_id": "claim-overdue",
+            "claim_type": "metric",
+            "text": "Overdue rate is 8.13%",
+            "normalized": {"metric": "overdue_rate", "value": 0.0813},
+            "verification": {
+                "claim_id": "claim-overdue",
+                "status": "verified",
+                "verification_method": "exact_match",
+                "support_score": 1.0,
+                "evidence_artifact_ids": ["sql-sales"],
+                "verifier_name": "exact-value",
+                "verifier_version": "1",
+            },
+        },
+        {
+            "claim_id": "claim-fulfilment",
+            "claim_type": "trend",
+            "text": "Fulfilment improved",
+        },
+    ]
+    insight["evidence"] = [
+        {
+            "artifact_id": "sql-sales",
+            "role": "calculation",
+            "selector": {"column": "gmv", "row": 0},
+            "target_selector": {
+                "kind": "text_segment",
+                "block_id": "insight-delta",
+                "segment_id": "segment-overdue",
+                "claim_id": "claim-overdue",
+                "quote": "8.13%",
+            },
+        },
+        {
+            "artifact_id": "python-delta",
+            "role": "support",
+            "selector": {"kind": "result"},
+            "target_selector": {
+                "kind": "text_segment",
+                "block_id": "insight-delta",
+                "segment_id": "segment-fulfilment",
+                "claim_id": "claim-fulfilment",
+                "quote": "fulfilment improved",
+            },
+        },
+    ]
+    return payload
+
+
+def test_schema_v3_round_trip_preserves_claim_segments_and_verification() -> None:
+    document = ReportDocument.model_validate(_valid_v3_report_payload())
+    insight = document.sections[0].blocks[3]
+    restored = ReportDocument.model_validate_json(document.model_dump_json())
+
+    assert document.schema_version == 3
+    assert isinstance(insight, InsightBlock)
+    assert isinstance(insight.segments[0], TextSegment)
+    assert isinstance(insight.segments[1], ClaimSegment)
+    assert isinstance(insight.claims[0], Claim)
+    assert isinstance(insight.claims[0].verification, ClaimVerificationResult)
+    assert insight.claims[0].claim_id == "claim-overdue"
+    assert restored == document
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda payload: payload["sections"][0]["blocks"][3].update(
+                {"segments": []}
+            ),
+            "requires segments",
+        ),
+        (
+            lambda payload: payload["sections"][0]["blocks"][3].update({"claims": []}),
+            "requires claims",
+        ),
+        (
+            lambda payload: payload["sections"][0]["blocks"][3]["segments"][1].update(
+                {"claim_id": "missing"}
+            ),
+            "unknown claim",
+        ),
+        (
+            lambda payload: payload["sections"][0]["blocks"][3].update(
+                {"content": "changed"}
+            ),
+            "segments must join",
+        ),
+    ],
+)
+def test_schema_v3_rejects_invalid_claim_segment_integrity(mutate, message) -> None:
+    payload = _valid_v3_report_payload()
+    mutate(payload)
+
+    with pytest.raises(ValidationError, match=message):
+        ReportDocument.model_validate(payload)
+
+
+def test_evidence_packet_preserves_bounded_handle_and_is_public() -> None:
+    import dbgpt.core as core
+
+    packet = EvidencePacket(
+        handles=[
+            EvidenceHandle(
+                handle_id="E3",
+                artifact_id="sql-overdue",
+                selector={
+                    "kind": "sql_cell",
+                    "row_key": {"month": "2026-08"},
+                    "column": "overdue_rate",
+                },
+                value=0.0813,
+            )
+        ]
+    )
+
+    assert packet.handles[0].handle_id == "E3"
+    assert packet.handles[0].selector["column"] == "overdue_rate"
+    assert core.EvidencePacket is EvidencePacket
+
+
+def test_evidence_packet_rejects_duplicate_or_unlocatable_handles() -> None:
+    with pytest.raises(ValidationError, match="duplicate evidence handle id"):
+        EvidencePacket(
+            handles=[
+                EvidenceHandle(
+                    handle_id="E1",
+                    artifact_id="sql-sales",
+                    selector={"kind": "result"},
+                ),
+                EvidenceHandle(
+                    handle_id="E1",
+                    artifact_id="sql-delta",
+                    selector={"kind": "result"},
+                ),
+            ]
+        )
+
+    with pytest.raises(ValidationError, match="selector must not be empty"):
+        EvidenceHandle(handle_id="E2", artifact_id="sql-sales", selector={})
 
 
 def test_report_round_trip_preserves_five_block_types_and_artifacts() -> None:
@@ -634,6 +838,12 @@ def test_report_protocol_is_available_from_core_public_api() -> None:
         "ArtifactContent",
         "ChartArtifact",
         "ChartBlock",
+        "Claim",
+        "ClaimSegment",
+        "ClaimType",
+        "ClaimVerificationResult",
+        "EvidenceHandle",
+        "EvidencePacket",
         "EvidenceReference",
         "ExecutionReference",
         "InsightBlock",
@@ -643,11 +853,18 @@ def test_report_protocol_is_available_from_core_public_api() -> None:
         "ReportBlock",
         "ReportDocument",
         "ReportSection",
+        "ReportTextSegment",
         "SQLArtifact",
         "TableBlock",
         "TextBlock",
+        "TextSegment",
+        "VerificationMethod",
+        "VerificationStatus",
     }
 
     assert all(hasattr(core, name) for name in public_names)
     assert core.ReportDocument is ReportDocument
     assert core.SQLArtifact is SQLArtifact
+    assert core.Claim is Claim
+    assert core.ClaimSegment is ClaimSegment
+    assert core.EvidenceHandle is EvidenceHandle

@@ -39,6 +39,33 @@ def test_save_delegates_server_owned_owner_and_run_metadata():
     )
 
 
+def test_save_runs_optional_pipeline_only_for_schema_v3_documents():
+    dao = MagicMock()
+    schema_v3 = MagicMock(schema_version=3)
+    verified = MagicMock(schema_version=3)
+    pipeline = MagicMock(return_value=verified)
+
+    ReportService(dao, verification_pipeline=pipeline).save(
+        owner_id="alice", document=schema_v3
+    )
+
+    pipeline.assert_called_once_with(schema_v3)
+    assert dao.save.call_args.args[0] is verified
+
+
+def test_save_skips_pipeline_for_legacy_document():
+    dao = MagicMock()
+    pipeline = MagicMock()
+    document = _document()
+
+    ReportService(dao, verification_pipeline=pipeline).save(
+        owner_id="alice", document=document
+    )
+
+    pipeline.assert_not_called()
+    assert dao.save.call_args.args[0] is document
+
+
 def test_assemble_and_save_builds_v2_document_from_captured_artifacts():
     dao = MagicMock()
     expected = MagicMock(spec=ReportRunRecord)

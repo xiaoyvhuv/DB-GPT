@@ -230,6 +230,116 @@ class EvidenceReference(_ProtocolModel):
     _validate_artifact_id = field_validator("artifact_id")(_require_non_blank)
 
 
+ClaimType = Literal[
+    "metric",
+    "comparison",
+    "trend",
+    "ranking",
+    "aggregation",
+    "descriptive",
+    "causal",
+    "recommendation",
+]
+
+VerificationStatus = Literal[
+    "verified",
+    "partially_supported",
+    "unsupported",
+    "insufficient_evidence",
+    "contradicted",
+    "unverifiable",
+    "error",
+]
+
+VerificationMethod = Literal[
+    "exact_match",
+    "recompute",
+    "comparison_rule",
+    "trend_rule",
+    "business_rule",
+    "time_series_rule",
+    "ranking_rule",
+    "nli",
+    "minicheck",
+    "llm_judge",
+]
+
+
+class ClaimVerificationResult(_ProtocolModel):
+    """Versioned result of verifying one factual report claim."""
+
+    claim_id: str
+    status: VerificationStatus
+    verification_method: VerificationMethod
+    support_score: Optional[float] = Field(default=None, ge=0, le=1)
+    evidence_artifact_ids: List[str] = Field(default_factory=list)
+    verifier_name: str
+    verifier_version: str
+    verified_at: Optional[datetime] = None
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    reason_code: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+    latency_ms: Optional[int] = Field(default=None, ge=0)
+
+    _validate_claim_id = field_validator("claim_id")(_require_non_blank)
+    _validate_verifier_name = field_validator("verifier_name")(_require_non_blank)
+    _validate_verifier_version = field_validator("verifier_version")(_require_non_blank)
+
+    @field_validator("reason_code")
+    @classmethod
+    def validate_reason_code(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            _require_non_blank(value)
+        return value
+
+    @field_validator("evidence_artifact_ids")
+    @classmethod
+    def validate_evidence_artifact_ids(cls, values: List[str]) -> List[str]:
+        for value in values:
+            _require_non_blank(value)
+        return values
+
+
+class Claim(_ProtocolModel):
+    """One verifiable proposition rendered by an insight block."""
+
+    claim_id: str
+    claim_type: ClaimType
+    text: str
+    normalized: Dict[str, Any] = Field(default_factory=dict)
+    verification: Optional[ClaimVerificationResult] = None
+
+    _validate_claim_id = field_validator("claim_id")(_require_non_blank)
+    _validate_text = field_validator("text")(_require_non_blank)
+
+
+class TextSegment(_ProtocolModel):
+    """Non-interactive text in a claim-aware insight block."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+    _validate_text = field_validator("text")(_require_non_blank)
+
+
+class ClaimSegment(_ProtocolModel):
+    """A clickable text span that renders one report claim."""
+
+    type: Literal["claim"] = "claim"
+    segment_id: str
+    claim_id: str
+    text: str
+
+    _validate_segment_id = field_validator("segment_id")(_require_non_blank)
+    _validate_claim_id = field_validator("claim_id")(_require_non_blank)
+    _validate_text = field_validator("text")(_require_non_blank)
+
+
+ReportTextSegment = Annotated[
+    Union[TextSegment, ClaimSegment], Field(discriminator="type")
+]
+
+
 class BaseReportBlock(_ProtocolModel):
     """Fields shared by all report block variants."""
 
@@ -283,6 +393,8 @@ class InsightBlock(BaseReportBlock):
 
     type: Literal["insight"] = "insight"
     content: str
+    segments: List[ReportTextSegment] = Field(default_factory=list)
+    claims: List[Claim] = Field(default_factory=list)
 
     _validate_content = field_validator("content")(_require_non_blank)
 
@@ -322,7 +434,7 @@ class ReportSection(_ProtocolModel):
 class ReportDocument(_ProtocolModel):
     """A versioned report and its self-contained evidence registry."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     report_id: str
     title: str
     conv_uid: str
@@ -417,7 +529,108 @@ class ReportDocument(_ProtocolModel):
                     f"chart artifact {artifact.artifact_id} requires SQL or Python "
                     "lineage"
                 )
+        if self.schema_version == 3:
+            self._validate_v3_claims(blocks, artifacts)
         return self
+
+    @staticmethod
+    def _validate_v3_claims(
+        blocks: List[ReportBlock], artifacts: Dict[str, Artifact]
+    ) -> None:
+        """Validate claim/segment integrity for claim-aware report snapshots."""
+        claim_ids = set()
+        segment_ids = set()
+        for block in blocks:
+            if not isinstance(block, InsightBlock):
+                continue
+            if not block.segments:
+                raise ValueError(
+                    f"schema version 3 insight block {block.block_id} requires segments"
+                )
+            if not block.claims:
+                raise ValueError(
+                    f"schema version 3 insight block {block.block_id} requires claims"
+                )
+            if "".join(segment.text for segment in block.segments) != block.content:
+                raise ValueError(
+                    f"schema version 3 insight block {block.block_id} segments must "
+                    "join to content"
+                )
+
+            block_claims = {claim.claim_id: claim for claim in block.claims}
+            duplicate = _find_duplicate(list(block_claims))
+            if duplicate is not None or len(block_claims) != len(block.claims):
+                duplicate = duplicate or next(
+                    claim.claim_id
+                    for claim in block.claims
+                    if sum(item.claim_id == claim.claim_id for item in block.claims) > 1
+                )
+                raise ValueError(f"duplicate claim id: {duplicate}")
+            for claim in block.claims:
+                if claim.claim_id in claim_ids:
+                    raise ValueError(f"duplicate claim id: {claim.claim_id}")
+                claim_ids.add(claim.claim_id)
+                if (
+                    claim.verification is not None
+                    and claim.verification.claim_id != claim.claim_id
+                ):
+                    raise ValueError(
+                        f"verification claim id does not match claim {claim.claim_id}"
+                    )
+                if claim.verification is not None:
+                    for artifact_id in claim.verification.evidence_artifact_ids:
+                        if artifact_id not in artifacts:
+                            raise ValueError(
+                                f"unknown verification artifact {artifact_id}"
+                            )
+
+            evidenced_claim_ids = set()
+            for segment in block.segments:
+                if not isinstance(segment, ClaimSegment):
+                    continue
+                if segment.segment_id in segment_ids:
+                    raise ValueError(f"duplicate segment id: {segment.segment_id}")
+                segment_ids.add(segment.segment_id)
+                if segment.claim_id not in block_claims:
+                    raise ValueError(f"unknown claim {segment.claim_id}")
+
+            for evidence in block.evidence:
+                target = evidence.target_selector
+                if target.get("kind") != "text_segment":
+                    continue
+                target_block_id = target.get("block_id")
+                target_segment_id = target.get("segment_id")
+                target_claim_id = target.get("claim_id")
+                if target_block_id != block.block_id:
+                    raise ValueError(
+                        f"text segment evidence targets wrong block {target_block_id}"
+                    )
+                segment = next(
+                    (
+                        value
+                        for value in block.segments
+                        if isinstance(value, ClaimSegment)
+                        and value.segment_id == target_segment_id
+                    ),
+                    None,
+                )
+                if segment is None:
+                    raise ValueError(f"unknown text segment {target_segment_id}")
+                if target_claim_id != segment.claim_id:
+                    raise ValueError(
+                        f"text segment {target_segment_id} targets wrong claim "
+                        f"{target_claim_id}"
+                    )
+                quote = target.get("quote")
+                if quote is not None and quote != segment.text:
+                    raise ValueError(
+                        f"text segment {target_segment_id} quote does not match"
+                    )
+                evidenced_claim_ids.add(segment.claim_id)
+
+            for claim_id in block_claims:
+                if claim_id not in evidenced_claim_ids:
+                    raise ValueError(f"claim {claim_id} requires target evidence")
 
     def _validate_v2_persistence_lengths(self) -> None:
         """Ensure new snapshots fit the shared relational persistence contract."""
@@ -495,6 +708,10 @@ __all__ = [
     "ArtifactContent",
     "ChartArtifact",
     "ChartBlock",
+    "Claim",
+    "ClaimSegment",
+    "ClaimType",
+    "ClaimVerificationResult",
     "EvidenceReference",
     "ExecutionReference",
     "InsightBlock",
@@ -514,7 +731,11 @@ __all__ = [
     "ReportBlock",
     "ReportDocument",
     "ReportSection",
+    "ReportTextSegment",
     "SQLArtifact",
     "TableBlock",
+    "TextSegment",
     "TextBlock",
+    "VerificationMethod",
+    "VerificationStatus",
 ]
