@@ -83,6 +83,7 @@ def test_assembler_maps_real_artifact_shapes_to_native_blocks() -> None:
             "chart-trend",
             "reference-market",
         ],
+        include_artifact_detail_blocks=True,
         created_at=CREATED_AT,
     )
 
@@ -142,6 +143,53 @@ def test_assembler_retains_failed_artifacts_without_fabricated_blocks() -> None:
     assert report.artifacts == [failed]
     assert report.sections == []
     assert report.metadata["task_summary"] == "The query could not be completed."
+
+
+def test_assembler_keeps_successful_execution_details_out_of_main_report() -> None:
+    report = ReportAssembler().assemble(
+        report_id="report-sidecar",
+        title="Rendered report",
+        conv_uid="conv-1",
+        final_content="The HTML report is the primary presentation.",
+        artifacts=[_sql("sql-gmv", ["gmv"], [[1_000]])],
+        created_at=CREATED_AT,
+    )
+
+    assert report.sections == []
+    assert report.artifacts[0].artifact_id == "sql-gmv"
+
+
+def test_assembler_can_include_only_native_chart_blocks_in_main_report() -> None:
+    sql = _sql("sql-trend", ["month", "gmv"], [["2026-08", 42]])
+    chart = ChartArtifact(
+        artifact_id="chart-trend",
+        execution=EXECUTION,
+        input_artifact_ids=[sql.artifact_id],
+        created_at=CREATED_AT,
+        status="succeeded",
+        duration_ms=1,
+        chart_type="response_line_chart",
+        spec={"renderer": "vis-db-chart", "data": [{"month": "2026-08", "gmv": 42}]},
+        output=ArtifactContent(inline={"type": "response_line_chart"}),
+    )
+
+    report = ReportAssembler().assemble(
+        report_id="report-charts",
+        title="Native charts",
+        conv_uid="conv-1",
+        final_content="Trend chart created.",
+        artifacts=[sql, chart],
+        include_chart_blocks=True,
+        created_at=CREATED_AT,
+    )
+
+    assert len(report.sections) == 1
+    assert [type(block) for block in report.sections[0].blocks] == [ChartBlock]
+    assert report.sections[0].blocks[0].chart_artifact_id == chart.artifact_id
+    assert [reference.artifact_id for reference in report.sections[0].blocks[0].evidence] == [
+        chart.artifact_id,
+        sql.artifact_id,
+    ]
 
 
 def test_assembler_does_not_render_unbound_summary_as_report_block() -> None:
@@ -213,3 +261,49 @@ def test_assembler_reports_missing_chart_dependency_as_integrity_error() -> None
             artifacts=[chart],
             created_at=CREATED_AT,
         )
+
+
+def test_assembler_persists_html_block_and_claim_evidence_targets() -> None:
+    metric = _sql("sql-gmv", ["gmv"], [[13_400_000]])
+
+    report = ReportAssembler().assemble(
+        report_id="report-html",
+        title="HTML report",
+        conv_uid="conv-1",
+        final_content="GMV was R$13.4M.",
+        artifacts=[metric],
+        presentation_bindings=[
+            {
+                "target_id": "html-block-gmv",
+                "target_type": "block",
+                "label": "总 GMV",
+                "artifact_ids": ["sql-gmv"],
+            },
+            {
+                "target_id": "html-claim-gmv",
+                "target_type": "claim",
+                "label": "R$13.4M",
+                "artifact_ids": ["sql-gmv"],
+            },
+        ],
+        presentation={"format": "html", "sha256": "abc", "content": "<html/>"},
+        created_at=CREATED_AT,
+    )
+
+    assert report.schema_version == 3
+    assert report.metadata["presentation"]["sha256"] == "abc"
+    presentation = report.sections[0]
+    assert presentation.section_id == "html-presentation"
+    block, claim_block = presentation.blocks
+    assert isinstance(block, TextBlock)
+    assert block.block_id == "html-block-gmv"
+    assert block.evidence[0].target_selector == {
+        "kind": "html_block",
+        "block_id": "html-block-gmv",
+    }
+    assert isinstance(claim_block, InsightBlock)
+    assert claim_block.claims[0].claim_id == "html-claim-gmv"
+    assert claim_block.evidence[0].target_selector["claim_id"] == "html-claim-gmv"
+    # The completed document must pass the same strict wire-contract round trip used
+    # by the persistence DAO.
+    assert report.model_validate_json(report.model_dump_json()) == report

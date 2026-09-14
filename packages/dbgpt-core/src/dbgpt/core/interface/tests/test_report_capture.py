@@ -255,6 +255,23 @@ def test_tabular_summary_is_lossless_and_bounds_preview() -> None:
     assert complete_hash == capture.sha256_json(complete)
 
 
+def test_tabular_summary_normalizes_sqlalchemy_style_rows() -> None:
+    capture = _capture_module()
+
+    class Row:
+        _mapping = {"category": "health_beauty", "revenue": Decimal("1253993.86")}
+
+    preview, _, row_count, truncated = capture.summarize_tabular_artifact(
+        ["category", "revenue"], [Row()], max_preview_rows=10, max_preview_bytes=10_000
+    )
+
+    assert row_count == 1
+    assert not truncated
+    assert preview["rows"] == [
+        {"category": "health_beauty", "revenue": {"$decimal": "1253993.86"}}
+    ]
+
+
 def test_text_hash_matches_utf8_hash_for_large_unicode_payload() -> None:
     capture = _capture_module()
     value = "证据-hash-" * 100_000

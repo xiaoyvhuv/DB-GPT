@@ -506,6 +506,27 @@ Action Input: {"result": "网络设备资产共 30 条"}"""
         assert current_steps[0].action == "query_db"
         assert current_steps[0].action_input == {"sql": "select count(*) from assets"}
 
+    def test_repeated_action_pair_keeps_the_first_valid_input(self):
+        """DeepSeek may duplicate one tool pair after a vis-thinking block.
+
+        The duplicate must not corrupt the first JSON payload and consume a
+        format-error retry.
+        """
+        parser = ReActOutputParser()
+        text = '''``````vis-thinking
+I will execute one query.
+``````
+Action: sql_query
+Action Input: {"sql": "SELECT 1"}
+Action: sql_query
+Action Input: {"sql": "SELECT 2"}'''
+
+        steps = parser.parse_current_step(text)
+
+        assert len(steps) == 1
+        assert steps[0].action == "sql_query"
+        assert steps[0].action_input == {"sql": "SELECT 1"}
+
     def test_react_markers_inside_action_input_code_fence_are_not_steps(self):
         """Do not split Action Input code fences that mention ReAct labels."""
         parser = ReActOutputParser()
@@ -615,6 +636,32 @@ Action Input: {"demo": true}
         assert steps[0].action == "terminate"
         assert steps[0].is_terminal
         assert parser.get_final_output(steps) == "最终答案"
+
+    def test_xml_shaped_tool_call_is_translated(self):
+        """OpenAI-compatible models sometimes emit XML tags instead of
+        textual ReAct; recover the valid JSON tool payload without matching
+        arbitrary non-JSON HTML."""
+        parser = ReActOutputParser()
+        text = (
+            "Thought: Continue the category analysis.\n\n"
+            "<sql_query>\n"
+            '{"sql": "SELECT category, SUM(gmv) FROM orders"}\n'
+            "</sql_query>"
+        )
+
+        steps = parser.parse_current_step(text)
+
+        assert len(steps) == 1
+        assert steps[0].thought == "Continue the category analysis."
+        assert steps[0].action == "sql_query"
+        assert steps[0].action_input == {
+            "sql": "SELECT category, SUM(gmv) FROM orders"
+        }
+
+    def test_non_json_html_is_not_treated_as_tool_call(self):
+        parser = ReActOutputParser()
+
+        assert parser.parse("<section><p>Report content</p></section>") == []
 
     def test_plain_answer_without_labels_is_still_rejected(self):
         """A bare answer (no ReAct labels, no native call) stays unparseable

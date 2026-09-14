@@ -1,12 +1,45 @@
 """sql_query tool — read-only SQL query against the selected database."""
 
 import json
+import re
 import time
 from typing import Any, Dict, Optional
 
 from dbgpt.agent.resource.tool.base import tool
+from dbgpt.core.interface.report_capture import normalize_artifact_value
 
 from .artifact_capture import capture_sql_execution, connector_database_name
+
+
+def _normalize_sql_markdown_escapes(sql: str) -> str:
+    """Undo Markdown escaping that some models leak into SQL identifiers."""
+    return re.sub(r"\\([_`*])", r"\1", sql)
+
+
+def _remember_sql_result(
+    react_state: Dict[str, Any],
+    *,
+    artifact_id: Optional[str],
+    sql: str,
+    columns: list[str],
+    rows: Any,
+) -> None:
+    """Expose bounded, JSON-safe real SQL outputs to later Python steps."""
+    if not artifact_id:
+        return
+    normalized_rows = [normalize_artifact_value(row) for row in list(rows)[:500]]
+    entry = {
+        "artifact_id": artifact_id,
+        "sql": sql,
+        "columns": columns,
+        "rows": normalized_rows,
+        "row_count": len(rows),
+        "truncated": len(rows) > len(normalized_rows),
+    }
+    history = react_state.setdefault("_report_sql_results", [])
+    if isinstance(history, list):
+        history.append(entry)
+        del history[:-8]
 
 
 def make_sql_query(
@@ -23,6 +56,7 @@ def make_sql_query(
     )
     def sql_query(sql: str) -> str:
         """Execute a read-only SQL query against the selected database."""
+        artifact_sink = react_state.get("_report_artifact_sink")
         if database_connector is None:
             return json.dumps(
                 {
@@ -36,7 +70,7 @@ def make_sql_query(
                 ensure_ascii=False,
             )
 
-        sql_stripped = sql.strip().rstrip(";")
+        sql_stripped = _normalize_sql_markdown_escapes(sql).strip().rstrip(";")
         sql_upper = sql_stripped.upper().lstrip()
         forbidden = [
             "INSERT",
@@ -70,10 +104,13 @@ def make_sql_query(
             if not result:
                 capture_sql_execution(
                     sql=sql_stripped,
-                    database=connector_database_name(database_connector),
+                    database=connector_database_name(
+                        database_connector, artifact_sink
+                    ),
                     duration_ms=int((time.perf_counter() - started) * 1000),
                     columns=[],
                     rows=[],
+                    artifact_sink=artifact_sink,
                 )
                 return json.dumps(
                     {
@@ -88,10 +125,18 @@ def make_sql_query(
             col_names = [str(c[0]) if isinstance(c, tuple) else str(c) for c in columns]
             rows = result[1:]
 
-            capture_sql_execution(
+            artifact_id = capture_sql_execution(
                 sql=sql_stripped,
-                database=connector_database_name(database_connector),
+                database=connector_database_name(database_connector, artifact_sink),
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                columns=col_names,
+                rows=rows,
+                artifact_sink=artifact_sink,
+            )
+            _remember_sql_result(
+                react_state,
+                artifact_id=artifact_id,
+                sql=sql_stripped,
                 columns=col_names,
                 rows=rows,
             )
@@ -122,9 +167,10 @@ def make_sql_query(
         except Exception as e:
             capture_sql_execution(
                 sql=sql_stripped,
-                database=connector_database_name(database_connector),
+                database=connector_database_name(database_connector, artifact_sink),
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 error=str(e) or type(e).__name__,
+                artifact_sink=artifact_sink,
             )
             return json.dumps(
                 {

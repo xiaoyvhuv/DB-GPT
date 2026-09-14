@@ -2,9 +2,10 @@
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from dbgpt._private.pydantic import BaseModel, Field, model_to_dict, model_to_json
 from dbgpt.vis.tags.vis_chart import Vis, VisChart
@@ -25,6 +26,28 @@ _MAX_DATAFRAME_PREVIEW_BYTES = 256 * 1024
 _MAX_DATAFRAME_PREVIEW_ROWS = 100
 _MAX_CHART_PREVIEW_CHARS = 50_000
 _MAX_CAPTURE_ERROR_CHARS = 8_000
+
+
+def _native_vis_chart_spec(view: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Extract the structured native-chart payload from a VisChart response.
+
+    ``VisChart`` returns a fenced ``vis-db-chart`` block for the web client's
+    native renderer.  Capturing that JSON, rather than just the display type,
+    lets a persisted report replay the exact chart without an iframe or a
+    second chart-generation implementation.
+    """
+    if not view:
+        return None
+    match = re.search(r"```vis-db-chart\s*(\{.*?\})\s*```", view, re.DOTALL)
+    if match is None:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+        return None
+    return {"renderer": "vis-db-chart", **payload}
 
 
 def _elapsed_ms(started: float) -> int:
@@ -135,6 +158,7 @@ def _capture_chart_render(
     *,
     view: Optional[str] = None,
     error: Optional[str] = None,
+    spec: Optional[Dict[str, Any]] = None,
 ) -> None:
     sink = get_current_artifact_sink()
     if sink is None or sql_artifact_id is None:
@@ -174,7 +198,7 @@ def _capture_chart_render(
                 duration_ms=duration_ms,
                 error=(error[:_MAX_CAPTURE_ERROR_CHARS] if error is not None else None),
                 chart_type=param.display_type,
-                spec={"display_type": param.display_type},
+                spec=spec or {"display_type": param.display_type},
                 output=output,
                 metadata=metadata,
             )
@@ -281,6 +305,7 @@ class ChartAction(Action[SqlInput]):
                 sql_artifact_id,
                 _elapsed_ms(render_started),
                 view=view,
+                spec=_native_vis_chart_spec(view),
             )
 
             param_dict = model_to_dict(param)

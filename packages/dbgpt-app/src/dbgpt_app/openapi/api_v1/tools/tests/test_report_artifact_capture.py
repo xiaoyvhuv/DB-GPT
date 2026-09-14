@@ -16,7 +16,10 @@ from dbgpt.core.interface.report_capture import (
 from dbgpt_app.openapi.api_v1.subagent.react_tools import make_react_tools
 from dbgpt_app.openapi.api_v1.tools import code_interpreter as code_interpreter_module
 from dbgpt_app.openapi.api_v1.tools.artifact_capture import MAX_SQL_PREVIEW_ROWS
-from dbgpt_app.openapi.api_v1.tools.sql_query import make_sql_query
+from dbgpt_app.openapi.api_v1.tools.sql_query import (
+    _normalize_sql_markdown_escapes,
+    make_sql_query,
+)
 
 
 class _SQLConnector:
@@ -29,6 +32,12 @@ class _SQLConnector:
         if self._error is not None:
             raise self._error
         return self._result
+
+
+def test_sql_normalizes_only_markdown_escape_characters() -> None:
+    assert _normalize_sql_markdown_escapes(
+        r"SELECT order\_id, '\d+' AS pattern, `x\_y`"
+    ) == r"SELECT order_id, '\d+' AS pattern, `x_y`"
 
 
 def _sink() -> InMemoryArtifactSink:
@@ -107,6 +116,43 @@ def test_sql_tool_without_bound_sink_keeps_existing_output() -> None:
             }
         ]
     }
+
+
+def test_sql_tool_uses_turn_state_sink_when_context_binding_is_absent() -> None:
+    sink = _sink()
+    tool = make_sql_query(
+        {"conv_id": "conv-1", "_report_artifact_sink": sink},
+        _SQLConnector(result=[["value"], [1]]),
+    )
+
+    tool(sql="SELECT 1 AS value")
+
+    artifact = sink.snapshot()[0]
+    assert isinstance(artifact, SQLArtifact)
+    assert artifact.result is not None
+    assert artifact.result.inline == {"columns": ["value"], "rows": [[1]]}
+
+
+def test_sql_tool_exposes_bounded_real_result_to_later_python_steps() -> None:
+    """The Python interpreter receives query output, never database credentials."""
+    sink = _sink()
+    state = {"conv_id": "conv-1", "_report_artifact_sink": sink}
+
+    make_sql_query(
+        state,
+        _SQLConnector(result=[["month", "gmv"], ["2018-01", 12.5]]),
+    )(sql="SELECT month, gmv FROM monthly_sales")
+
+    assert state["_report_sql_results"] == [
+        {
+            "artifact_id": sink.snapshot()[0].artifact_id,
+            "sql": "SELECT month, gmv FROM monthly_sales",
+            "columns": ["month", "gmv"],
+            "rows": [["2018-01", 12.5]],
+            "row_count": 1,
+            "truncated": False,
+        }
+    ]
 
 
 def test_sql_tool_without_sink_does_not_inspect_database_identity() -> None:
@@ -233,6 +279,81 @@ async def test_python_without_sink_decodes_stdout_once(tmp_path, monkeypatch) ->
 
     assert response["chunks"][1]["content"] == "result"
     assert stdout.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_python_tool_receives_prior_sql_results_through_read_only_env(
+    tmp_path, monkeypatch
+) -> None:
+    """SQL results are injected as JSON and exposed by sql_result_frame()."""
+    calls = []
+
+    async def seam(script_path, *, cwd, env, timeout=60):
+        calls.append(
+            {
+                "source": Path(script_path).read_text(encoding="utf-8"),
+                "context": json.loads(
+                    Path(env["SQL_RESULTS_PATH"]).read_text(encoding="utf-8")
+                ),
+                "context_path": env["SQL_RESULTS_PATH"],
+            }
+        )
+        return 0, b"sql-context-ok", b""
+
+    monkeypatch.setattr(code_interpreter_module, "_run_python_file", seam)
+    _patch_code_paths(monkeypatch, tmp_path)
+    state = {
+        "conv_id": "sql-context",
+        "_report_sql_results": [
+            {
+                "artifact_id": "sql-monthly",
+                "sql": "SELECT month, gmv FROM monthly_sales",
+                "columns": ["month", "gmv"],
+                "rows": [["2018-01", 12.5]],
+                "row_count": 1,
+                "truncated": False,
+            }
+        ],
+    }
+
+    response = json.loads(
+        await code_interpreter_module.make_code_interpreter(state)(
+            code="frame = sql_result_frame(-1)\nprint(frame.iloc[0]['gmv'])"
+        )
+    )
+
+    assert calls[0]["context"] == state["_report_sql_results"]
+    assert "def sql_result_frame(index=-1):" in calls[0]["source"]
+    assert "SQL_RESULTS_PATH" in calls[0]["source"]
+    assert not Path(calls[0]["context_path"]).exists()
+    assert response["chunks"][1]["content"] == "sql-context-ok"
+
+
+@pytest.mark.asyncio
+async def test_python_sql_context_usage_records_sql_lineage(tmp_path, monkeypatch) -> None:
+    async def seam(script_path, *, cwd, env, timeout=60):
+        return 0, b"ok", b""
+
+    monkeypatch.setattr(code_interpreter_module, "_run_python_file", seam)
+    _patch_code_paths(monkeypatch, tmp_path)
+    sink = _sink()
+    state = {
+        "conv_id": "sql-lineage",
+        "_report_artifact_sink": sink,
+    }
+    make_sql_query(
+        state,
+        _SQLConnector(result=[["month", "gmv"], ["2018-01", 12.5]]),
+    )(sql="SELECT month, gmv FROM monthly_sales")
+    sql_artifact = sink.snapshot()[0]
+
+    await code_interpreter_module.make_code_interpreter(state)(
+        code="frame = sql_result_frame(-1)\nprint(len(frame))"
+    )
+
+    artifact = sink.snapshot()[1]
+    assert isinstance(artifact, PythonArtifact)
+    assert artifact.input_artifact_ids == [sql_artifact.artifact_id]
 
 
 @pytest.mark.asyncio

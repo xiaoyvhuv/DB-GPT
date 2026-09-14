@@ -350,7 +350,26 @@ class Role(ABC, BaseModel):
         if not action_output:
             raise ValueError("Action output is required to save to memory.")
 
-        mem_thoughts = action_output.thoughts or ai_message
+        # A malformed ReAct reply can be very large (especially when a model
+        # leaks its hidden reasoning).  It is not useful evidence for the next
+        # turn, and storing it verbatim causes every retry to resend the same
+        # oversized prompt.  Keep only a compact, actionable repair instruction
+        # for parser-format failures; successful tool observations are unchanged.
+        failure_text = (check_fail_reason or "").lower()
+        is_react_format_failure = not check_pass and any(
+            marker in failure_text
+            for marker in (
+                "no valid react step",
+                "no correct response found",
+                "only one action is allowed",
+            )
+        )
+        mem_thoughts = (
+            "Previous response was an invalid ReAct tool call. "
+            "Retry with exactly one Action and one Action Input."
+            if is_react_format_failure
+            else (action_output.thoughts or ai_message)
+        )
         action = action_output.action
         action_input = action_output.action_input
         phase = action_output.phase if hasattr(action_output, "phase") else None
@@ -364,7 +383,12 @@ class Role(ABC, BaseModel):
             if hasattr(action_output, "action_reason")
             else None
         )
-        observation = check_fail_reason or action_output.observations
+        observation = (
+            "Invalid ReAct format; the raw model response was intentionally "
+            "not retained in retry memory."
+            if is_react_format_failure
+            else (check_fail_reason or action_output.observations)
+        )
 
         # When the tool result was persisted to disk (oversized output),
         # ``content`` holds the <persisted-output> preview block (with file

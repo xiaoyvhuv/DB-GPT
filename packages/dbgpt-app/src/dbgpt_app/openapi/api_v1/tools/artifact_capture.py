@@ -15,6 +15,7 @@ from dbgpt.core.interface.report import (
     SQLArtifact,
 )
 from dbgpt.core.interface.report_capture import (
+    ArtifactSink,
     get_current_artifact_sink,
     sha256_json,
     sha256_text,
@@ -63,9 +64,11 @@ def _sha256_file(path: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def connector_database_name(database_connector: Any) -> Optional[str]:
+def connector_database_name(
+    database_connector: Any, artifact_sink: Optional[ArtifactSink] = None
+) -> Optional[str]:
     """Return the current DB identity without exposing connector credentials."""
-    if get_current_artifact_sink() is None:
+    if artifact_sink is None and get_current_artifact_sink() is None:
         return None
     try:
         name = getattr(database_connector, "_db_name", None)
@@ -88,9 +91,10 @@ def capture_sql_execution(
     columns: Optional[Sequence[str]] = None,
     rows: Optional[Sequence[Any]] = None,
     error: Optional[str] = None,
+    artifact_sink: Optional[ArtifactSink] = None,
 ) -> Optional[str]:
     """Record one real SQL attempt; capture failures never alter tool behavior."""
-    sink = get_current_artifact_sink()
+    sink = artifact_sink or get_current_artifact_sink()
     if sink is None:
         return None
 
@@ -161,9 +165,11 @@ def capture_python_execution(
     stderr: str,
     error: Optional[str] = None,
     image_urls: Optional[Sequence[str]] = None,
+    input_artifact_ids: Optional[Sequence[str]] = None,
+    artifact_sink: Optional[ArtifactSink] = None,
 ) -> Optional[str]:
     """Record subprocess state before user-facing output is truncated."""
-    sink = get_current_artifact_sink()
+    sink = artifact_sink or get_current_artifact_sink()
     if sink is None:
         return None
 
@@ -174,6 +180,7 @@ def capture_python_execution(
         artifact = PythonArtifact(
             artifact_id=artifact_id,
             execution=sink.context.execution_reference(action="code_interpreter"),
+            input_artifact_ids=list(input_artifact_ids or []),
             created_at=datetime.now(timezone.utc),
             status=status,
             duration_ms=max(0, duration_ms),
@@ -213,9 +220,10 @@ def capture_generated_chart(
     uri: str,
     path: str,
     filename: str,
+    artifact_sink: Optional[ArtifactSink] = None,
 ) -> Optional[str]:
     """Record one image emitted by a previously recorded Python execution."""
-    sink = get_current_artifact_sink()
+    sink = artifact_sink or get_current_artifact_sink()
     if sink is None:
         return None
 

@@ -30,6 +30,16 @@ def _decode_sse_event(event: str):
     return json.loads(event.removeprefix("data: ").strip())
 
 
+def test_extracts_explicit_recommendation_count_from_user_request() -> None:
+    assert (
+        agentic_data_api._requested_recommendation_count(
+            "分析经营表现，最后给出三条可执行的经营建议。"
+        )
+        == 3
+    )
+    assert agentic_data_api._requested_recommendation_count("概览 GMV 趋势") is None
+
+
 def test_history_failure_does_not_drop_final_or_done(caplog) -> None:
     class _FailingStorageConversation:
         def add_view_message(self, payload: str) -> None:
@@ -100,6 +110,44 @@ async def test_agent_operation_binds_and_restores_turn_artifact_sink() -> None:
 
     assert result == "done"
     assert get_current_artifact_sink() is None
+
+
+def test_captured_artifact_is_correlated_with_visible_execution_step() -> None:
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-1",
+            execution=ExecutionReference(
+                conv_uid="conv-1",
+                step_id="captured-step",
+                run_id="turn-1",
+                action="sql_query",
+            ),
+            created_at=datetime.now(timezone.utc),
+            status="succeeded",
+            duration_ms=1,
+            sql="SELECT 1",
+            columns=["value"],
+            row_count=1,
+            result=ArtifactContent(
+                inline={"columns": ["value"], "rows": [[1]]}
+            ),
+        )
+    )
+    state = {}
+
+    agentic_data_api._record_visible_artifact_step_ids(
+        sink,
+        state,
+        action="sql_query",
+        visible_step_id="visible-step-7",
+    )
+
+    assert state["_report_execution_step_map"] == {
+        "captured-step": "visible-step-7"
+    }
 
 
 def test_subagent_sql_step_is_captured_as_tabular_artifact() -> None:
@@ -190,6 +238,8 @@ async def test_completed_turn_assembles_and_persists_captured_report(
         user_input="Analyze total sales\nwith evidence",
         final_answer=final_answer,
         artifact_sink=sink,
+        presentation={"format": "html", "content": "<html></html>"},
+        execution_step_map={"step-1": "visible-step-7"},
     )
 
     assert actual is expected
@@ -200,11 +250,52 @@ async def test_completed_turn_assembles_and_persists_captured_report(
     assert kwargs["conv_uid"] == "conv-1"
     assert kwargs["run_id"] == "turn-1"
     assert kwargs["artifacts"][0].artifact_id == "sql-total"
+    assert kwargs["artifacts"][0].execution.step_id == "visible-step-7"
     assert "supporting_artifact_ids" not in kwargs
     assert kwargs["metadata"] == {
         "source": "react_agent",
         "capture_run_id": "turn-1",
+        "presentation_status": "rendered",
     }
+
+
+@pytest.mark.asyncio
+async def test_unrendered_turn_does_not_persist_as_completed_report(monkeypatch) -> None:
+    sink = InMemoryArtifactSink(
+        ArtifactCaptureContext(conv_uid="conv-1", run_id="turn-1")
+    )
+    sink.record(
+        SQLArtifact(
+            artifact_id="sql-total",
+            execution=ExecutionReference(
+                conv_uid="conv-1", step_id="step-1", run_id="turn-1"
+            ),
+            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            status="succeeded",
+            duration_ms=2,
+            sql="SELECT 42 AS total",
+            columns=["total"],
+            row_count=1,
+            result=ArtifactContent(inline={"columns": ["total"], "rows": [[42]]}),
+        )
+    )
+    service = MagicMock()
+    monkeypatch.setattr(
+        ReportServe,
+        "get_current_serve",
+        classmethod(lambda _cls, _app: SimpleNamespace(service=service)),
+    )
+
+    actual = await agentic_data_api._assemble_and_persist_turn_report(
+        dialogue=SimpleNamespace(user_name="alice"),
+        conv_id="conv-1",
+        user_input="Analyze total sales",
+        final_answer=AgentFinalAnswer(content="The total is 42."),
+        artifact_sink=sink,
+    )
+
+    assert actual is None
+    service.assemble_and_save.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -241,6 +332,7 @@ async def test_report_persistence_failure_does_not_break_completed_turn(
         user_input="Run query",
         final_answer=AgentFinalAnswer(content="The query failed."),
         artifact_sink=sink,
+        presentation={"format": "html", "content": "<html></html>"},
     )
 
     assert actual is None
@@ -323,7 +415,7 @@ async def test_report_timeout_abandons_blocking_service_wait(
         user_input="Analyze sales",
         final_answer=AgentFinalAnswer(content="Answer"),
         artifact_sink=sink,
-        react_state={},
+        react_state={"_report_presentation": {"format": "html", "content": "<html></html>"}},
     )
     try:
         assert await asyncio.to_thread(started.wait, 1)
@@ -382,9 +474,9 @@ async def test_report_persistence_capacity_does_not_exhaust_shared_executor(
             dialogue=SimpleNamespace(user_name="alice"),
             conv_id="conv-1",
             user_input="Analyze sales",
-            final_answer=AgentFinalAnswer(content="Answer"),
-            artifact_sink=sink,
-            react_state={},
+                final_answer=AgentFinalAnswer(content="Answer"),
+                artifact_sink=sink,
+                react_state={"_report_presentation": {"format": "html", "content": "<html></html>"}},
         )
 
     first = schedule()

@@ -1198,8 +1198,21 @@ class ConversableAgent(Role, Agent):
                 can_uses = self._excluded_models(all_model_names, None, excluded_models)
             if can_uses and len(can_uses) > 0:
                 return can_uses[0]
-            else:
-                return "deepseek-chat"
+            # A client can retain a model name that was removed from the
+            # server configuration.  Do not fall back to the historical
+            # hard-coded ``deepseek-chat`` name: it may not exist either.
+            # Use another healthy model advertised by the worker manager.
+            fallback_models = self._excluded_models(
+                all_model_names, None, excluded_models
+            )
+            if fallback_models:
+                logger.warning(
+                    "Requested LLM priority %s is unavailable; falling back to %s",
+                    priority if self.not_null_llm_config.llm_strategy == LLMStrategyType.Priority else None,
+                    fallback_models[0],
+                )
+                return fallback_models[0]
+            raise ValueError("No healthy LLM model is available")
         except Exception as e:
             logger.error(f"{self.role} get next llm failed!{str(e)}")
             raise ValueError(f"Failed to allocate model service,{str(e)}!")

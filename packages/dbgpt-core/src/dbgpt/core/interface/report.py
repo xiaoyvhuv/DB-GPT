@@ -230,6 +230,29 @@ class EvidenceReference(_ProtocolModel):
     _validate_artifact_id = field_validator("artifact_id")(_require_non_blank)
 
 
+class ReportPresentationBinding(_ProtocolModel):
+    """Bind one rendered HTML target to its supporting artifact set."""
+
+    target_id: str
+    target_type: Literal["block", "claim"]
+    label: str
+    artifact_ids: List[str]
+
+    _validate_target_id = field_validator("target_id")(_require_non_blank)
+    _validate_label = field_validator("label")(_require_non_blank)
+
+    @field_validator("artifact_ids")
+    @classmethod
+    def validate_artifact_ids(cls, values: List[str]) -> List[str]:
+        if not values:
+            raise ValueError("presentation binding requires evidence")
+        for value in values:
+            _require_non_blank(value)
+        if len(values) != len(set(values)):
+            raise ValueError("presentation binding contains duplicate artifacts")
+        return values
+
+
 ClaimType = Literal[
     "metric",
     "comparison",
@@ -730,6 +753,7 @@ __all__ = [
     "ReferenceArtifact",
     "ReportBlock",
     "ReportDocument",
+    "ReportPresentationBinding",
     "ReportSection",
     "ReportTextSegment",
     "SQLArtifact",

@@ -118,6 +118,10 @@ def make_code_interpreter(
             "Supports pandas, numpy, matplotlib, json, os, etc. "
             "Use this tool when you need to run Python code to process data, "
             "generate charts, or perform calculations. "
+            "When SQL was executed earlier in this report turn, use the injected "
+            "SQL_RESULTS list or sql_result_frame(index) instead of reconnecting "
+            "to or scanning for the database. Each item has artifact_id, sql, "
+            "columns, rows, row_count and truncated; index -1 is the latest query. "
             'Parameters: {{"code": "python code string"}}'
         )
     )
@@ -157,6 +161,14 @@ def make_code_interpreter(
             "os.makedirs(PLOT_DIR, exist_ok=True)",
             'FILE_PATH = os.environ.get("FILE_PATH") or None',
             'FILES_JSON = os.environ.get("FILES_JSON") or None',
+            'SQL_RESULTS_PATH = os.environ.get("SQL_RESULTS_PATH") or None',
+            "SQL_RESULTS = []",
+            "if SQL_RESULTS_PATH:",
+            '    with open(SQL_RESULTS_PATH, encoding="utf-8") as _sql_results_file:',
+            "        SQL_RESULTS = json.load(_sql_results_file)",
+            'def sql_result_frame(index=-1):',
+            '    dataset = SQL_RESULTS[index]',
+            '    return pd.DataFrame(dataset["rows"], columns=dataset["columns"])',
         ]
         preamble = "\n".join(preamble_lines) + "\n"
         full_code = preamble + code
@@ -190,6 +202,7 @@ def make_code_interpreter(
                     stdout="",
                     stderr="",
                     error=error_msg,
+                    artifact_sink=react_state.get("_report_artifact_sink"),
                 )
                 return json.dumps(
                     {
@@ -208,7 +221,24 @@ def make_code_interpreter(
         stdout = b""
         stderr = b""
         stdout_text = ""
+        sql_input_artifact_ids: List[str] = []
         try:
+            sql_results_path = None
+            sql_results = react_state.get("_report_sql_results")
+            if isinstance(sql_results, list) and sql_results:
+                sql_results_path = os.path.join(work_dir, "_report_sql_results.json")
+                with open(sql_results_path, "w", encoding="utf-8") as context_file:
+                    json.dump(sql_results, context_file, ensure_ascii=False, allow_nan=False)
+                # Record an actual lineage edge only when the submitted code
+                # consumes the injected SQL context.  Merely having earlier
+                # query results available must not claim a false dependency.
+                if "sql_result_frame" in code or "SQL_RESULTS" in code:
+                    sql_input_artifact_ids = [
+                        item["artifact_id"]
+                        for item in sql_results
+                        if isinstance(item, dict)
+                        and isinstance(item.get("artifact_id"), str)
+                    ]
             tmp_path = os.path.join(work_dir, "_run.py")
             with open(tmp_path, "w", encoding="utf-8") as tmp:
                 tmp.write(full_code)
@@ -220,6 +250,7 @@ def make_code_interpreter(
                     work_dir=work_dir,
                     file_path=react_state.get("file_path"),
                     files_json_path=react_state.get("files_json_path"),
+                    extra={"SQL_RESULTS_PATH": sql_results_path} if sql_results_path else None,
                 ),
                 timeout=EXECUTION_TIMEOUT_SECONDS,
             )
@@ -319,6 +350,8 @@ def make_code_interpreter(
             stderr=error_text,
             error=artifact_error,
             image_urls=[url for url, _path in captured_images],
+            input_artifact_ids=sql_input_artifact_ids,
+            artifact_sink=react_state.get("_report_artifact_sink"),
         )
         if python_artifact_id is not None:
             for image_url, image_path in captured_images:
@@ -328,6 +361,7 @@ def make_code_interpreter(
                         uri=image_url,
                         path=image_path,
                         filename=os.path.basename(image_path),
+                        artifact_sink=react_state.get("_report_artifact_sink"),
                     )
                 except Exception:
                     logger.warning(
@@ -340,6 +374,8 @@ def make_code_interpreter(
             script_path = os.path.join(work_dir, "_run.py")
             if os.path.exists(script_path):
                 os.remove(script_path)
+            if 'sql_results_path' in locals() and sql_results_path and os.path.exists(sql_results_path):
+                os.remove(sql_results_path)
         except Exception:
             pass
 
