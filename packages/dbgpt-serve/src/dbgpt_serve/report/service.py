@@ -3,7 +3,11 @@
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-from dbgpt.core.interface.report import Artifact, ReportDocument
+from dbgpt.core.interface.report import (
+    Artifact,
+    ReportDocument,
+    ReportPresentationBinding,
+)
 from dbgpt.core.interface.report_assembly import ReportAssembler
 
 from .domain import ReportEvidenceDetail, ReportRunRecord, ReportRunSummary
@@ -64,6 +68,11 @@ class ReportService:
         final_content: str,
         artifacts: Sequence[Artifact],
         supporting_artifact_ids: Iterable[str] = (),
+        presentation_bindings: Sequence[
+            ReportPresentationBinding | Dict[str, Any]
+        ] = (),
+        presentation: Optional[Dict[str, Any]] = None,
+        include_chart_blocks: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         created_at: Optional[datetime] = None,
         trigger_type: str = "interactive",
@@ -78,6 +87,9 @@ class ReportService:
             final_content=final_content,
             artifacts=artifacts,
             supporting_artifact_ids=supporting_artifact_ids,
+            presentation_bindings=presentation_bindings,
+            presentation=presentation,
+            include_chart_blocks=include_chart_blocks,
             created_at=created_at,
             metadata=metadata,
         )

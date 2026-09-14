@@ -11,6 +11,7 @@ import math
 import re
 import threading
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
@@ -478,6 +479,16 @@ def normalize_artifact_value(value: Any) -> Any:
         return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
     if isinstance(value, Enum):
         return normalize_artifact_value(value.value)
+    # SQLAlchemy Result rows are neither tuples nor dictionaries, but expose
+    # their stable column/value view through ``_mapping``.  Treating the Row
+    # object itself as unsupported discarded otherwise successful SQL evidence.
+    row_mapping = getattr(value, "_mapping", None)
+    if isinstance(row_mapping, Mapping):
+        if not all(isinstance(key, str) for key in row_mapping):
+            raise ValueError("artifact mappings require string keys")
+        return {
+            key: normalize_artifact_value(item) for key, item in row_mapping.items()
+        }
     if isinstance(value, (list, tuple)):
         return [normalize_artifact_value(item) for item in value]
     if isinstance(value, dict):

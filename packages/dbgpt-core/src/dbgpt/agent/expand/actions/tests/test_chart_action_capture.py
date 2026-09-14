@@ -30,6 +30,17 @@ class _Renderer:
         return '{"type":"line","data":[100]}'
 
 
+class _NativeVisRenderer:
+    async def display(self, *, chart, data_df):
+        return (
+            "```vis-db-chart\n"
+            '{"type":"response_line_chart","title":"GMV trend",'
+            '"describe":"monthly GMV","sql":"SELECT day, gmv FROM sales",'
+            '"data":[{"day":"2026-08-23","gmv":100}]}\n'
+            "```"
+        )
+
+
 def _action(monkeypatch, renderer=None, database=None) -> ChartAction:
     action = ChartAction()
     action._render_protocol = renderer or _Renderer()
@@ -75,6 +86,41 @@ async def test_chart_action_captures_sql_to_chart_dependency(monkeypatch) -> Non
     assert chart.output is not None
     assert chart.output.inline == result.view
     assert chart.output.sha256 == sha256_text(result.view)
+
+
+@pytest.mark.asyncio
+async def test_chart_action_captures_native_vis_chart_spec(monkeypatch) -> None:
+    action = _action(monkeypatch, renderer=_NativeVisRenderer())
+    sink = _sink()
+
+    with bind_artifact_sink(sink):
+        result = await action.run("ignored")
+
+    sql, chart = sink.snapshot()
+    assert result.is_exe_success
+    assert isinstance(chart, ChartArtifact)
+    assert chart.input_artifact_ids == [sql.artifact_id]
+    assert chart.spec == {
+        "renderer": "vis-db-chart",
+        "type": "response_line_chart",
+        "title": "GMV trend",
+        "describe": "monthly GMV",
+        "sql": "SELECT day, gmv FROM sales",
+        "data": [{"day": "2026-08-23", "gmv": 100}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_chart_action_keeps_legacy_spec_for_invalid_vis_payload(monkeypatch) -> None:
+    action = _action(monkeypatch, renderer=_Renderer())
+    sink = _sink()
+
+    with bind_artifact_sink(sink):
+        await action.run("ignored")
+
+    chart = sink.snapshot()[-1]
+    assert isinstance(chart, ChartArtifact)
+    assert chart.spec == {"display_type": "line"}
 
 
 @pytest.mark.asyncio

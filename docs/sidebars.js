@@ -132,6 +132,7 @@ const sidebars = {
         { type: "doc", id: "awel/awel", label: "What is AWEL?" },
         { type: "doc", id: "agents/introduction/introduction", label: "Agents Overview" },
         { type: "doc", id: "modules/connections", label: "Connections Overview" },
+        { type: "doc", id: "modules/observability", label: "Observability Overview" },
       ],
     },
 
@@ -925,6 +926,7 @@ const sidebars = {
       collapsed: false,
       items: [
         { type: "doc", id: "changelog/doc" },
+        { type: "doc", id: "changelog/Released_V0.8.2" },
         { type: "doc", id: "changelog/Released_V0.8.1" },
         { type: "doc", id: "changelog/Released_V0.8.0" },
         { type: "doc", id: "changelog/Released_V0.6.0" },
@@ -936,6 +938,7 @@ const sidebars = {
       label: "Upgrade",
       collapsed: false,
       items: [
+        { type: "doc", id: "upgrade/v0.8.2" },
         { type: "doc", id: "upgrade/v0.8.1" },
         { type: "doc", id: "upgrade/v0.8.0" },
         { type: "doc", id: "upgrade/v0.6.0" },

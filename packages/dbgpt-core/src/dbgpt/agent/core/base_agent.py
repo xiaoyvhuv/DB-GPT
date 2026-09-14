@@ -1198,8 +1198,21 @@ class ConversableAgent(Role, Agent):
                 can_uses = self._excluded_models(all_model_names, None, excluded_models)
             if can_uses and len(can_uses) > 0:
                 return can_uses[0]
-            else:
-                return "deepseek-chat"
+            # A client can retain a model name that was removed from the
+            # server configuration.  Do not fall back to the historical
+            # hard-coded ``deepseek-chat`` name: it may not exist either.
+            # Use another healthy model advertised by the worker manager.
+            fallback_models = self._excluded_models(
+                all_model_names, None, excluded_models
+            )
+            if fallback_models:
+                logger.warning(
+                    "Requested LLM priority %s is unavailable; falling back to %s",
+                    priority if self.not_null_llm_config.llm_strategy == LLMStrategyType.Priority else None,
+                    fallback_models[0],
+                )
+                return fallback_models[0]
+            raise ValueError("No healthy LLM model is available")
         except Exception as e:
             logger.error(f"{self.role} get next llm failed!{str(e)}")
             raise ValueError(f"Failed to allocate model service,{str(e)}!")
@@ -1350,7 +1363,6 @@ class ConversableAgent(Role, Agent):
             memory_list = memories
         else:
             most_recent_memories = memories
-        has_memories = True if memories else False
         reply_message_str = ""
         if context is None:
             context = {}
@@ -1411,17 +1423,16 @@ class ConversableAgent(Role, Agent):
                     role=ModelMessageRoleType.SYSTEM,
                 )
             )
-        if historical_dialogues and not has_memories:
-            # If we can't read the memory, we need to rely on the historical dialogue
+        if historical_dialogues:
+            # Always pass the full prior Q&A dialogue to the model (multi-turn
+            # follow-ups need the earlier turns), independent of whether memory
+            # fragments were also read. Even index = user, odd index = AI.
             for i in range(len(historical_dialogues)):
                 if i % 2 == 0:
-                    # The even number starts, and the even number is the user
-                    # information
                     message = historical_dialogues[i]
                     message.role = ModelMessageRoleType.HUMAN
                     agent_messages.append(message)
                 else:
-                    # The odd number is AI information
                     message = historical_dialogues[i]
                     message.role = ModelMessageRoleType.AI
                     agent_messages.append(message)

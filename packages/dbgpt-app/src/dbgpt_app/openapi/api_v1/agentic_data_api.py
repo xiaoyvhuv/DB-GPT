@@ -23,6 +23,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     Tuple,
     TypeVar,
 )
@@ -88,6 +89,37 @@ from .subagent.history import (
     fail_running_subagent_history,
     update_subagent_history,
 )
+
+
+_CHINESE_RECOMMENDATION_COUNTS = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def _requested_recommendation_count(user_input: str) -> Optional[int]:
+    """Return a fixed recommendation count explicitly requested by the user."""
+    match = re.search(
+        r"(?:最后|并|再)?\s*(?:给出|提供|提出|输出)\s*"
+        r"(?P<count>\d+|[一二两三四五六七八九十])\s*条[^。；，]{0,24}?"
+        r"(?:经营|可执行|行动)?[^。；，]{0,12}?(?:建议|recommendations?)",
+        user_input,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    raw_count = match.group("count")
+    count = int(raw_count) if raw_count.isdigit() else _CHINESE_RECOMMENDATION_COUNTS[raw_count]
+    return count if 1 <= count <= 20 else None
 
 router = APIRouter()
 CFG = Config()
@@ -312,7 +344,7 @@ async def execute_skill_script(skill_name: str, script_name: str, args: dict) ->
     "\\n示例:"
     '\\n- 读取参考文档: {"skill_name": "my-skill", '
     '"resource_path": "references/analysis_framework.md"}'
-    "\n注意: 执行脚本请使用 shell_interpreter 工具"
+    "\n注意: 执行技能脚本请使用 execute_skill_script_file 工具"
 )
 async def get_skill_resource(
     skill_name: str, resource_path: str, args: Optional[dict] = None
@@ -1087,6 +1119,16 @@ def _turn_report_coordinates(
     return f"report-{report_token}", artifact_sink.context.run_id
 
 
+def _has_rendered_html_presentation(presentation: Any) -> bool:
+    """Return whether this turn has a complete HTML report to expose."""
+    return (
+        isinstance(presentation, dict)
+        and presentation.get("format") == "html"
+        and isinstance(presentation.get("content"), str)
+        and bool(presentation["content"].strip())
+    )
+
+
 _MARKDOWN_TABLE_SEPARATOR = re.compile(r"^:?-{3,}:?$")
 _MARKDOWN_INTEGER = re.compile(r"^-?(?:0|[1-9]\d*)$")
 _MARKDOWN_FLOAT = re.compile(r"^-?(?:0|[1-9]\d*)\.\d+$")
@@ -1160,6 +1202,40 @@ def _capture_subagent_step_artifact(
     except (TypeError, ValueError):
         step_suffix = "0"
     result = {"columns": columns, "rows": rows}
+    # Only persist lineage explicitly emitted by the execution event.  Do not infer
+    # table names from SQL text: inferred names look convincing in a graph but are
+    # not a durable, replayable lineage assertion.
+    event_metadata = event.get("metadata")
+    event_metadata = event_metadata if isinstance(event_metadata, dict) else {}
+    source_id = event.get("source_id") or event_metadata.get("source_id")
+    source_name = (
+        event.get("source_name")
+        or event.get("datasource_name")
+        or event.get("database")
+        or event_metadata.get("source_name")
+        or event_metadata.get("datasource_name")
+    )
+    raw_tables = (
+        event.get("source_tables")
+        or event.get("tables")
+        or event_metadata.get("source_tables")
+        or event_metadata.get("tables")
+        or []
+    )
+    tables = (
+        [table.strip() for table in raw_tables if isinstance(table, str) and table.strip()]
+        if isinstance(raw_tables, list)
+        else []
+    )
+    lineage = {
+        key: value
+        for key, value in {
+            "source_id": source_id if isinstance(source_id, str) else None,
+            "source_name": source_name if isinstance(source_name, str) else None,
+            "tables": tables or None,
+        }.items()
+        if value is not None
+    }
     try:
         artifact_sink.record(
             SQLArtifact(
@@ -1172,6 +1248,7 @@ def _capture_subagent_step_artifact(
                 status="succeeded",
                 duration_ms=0,
                 sql=sql,
+                database=source_name if isinstance(source_name, str) else None,
                 columns=columns,
                 row_count=len(rows),
                 result=ArtifactContent(
@@ -1190,6 +1267,7 @@ def _capture_subagent_step_artifact(
                         "sql_sha256": sha256_text(sql),
                     },
                     "output_summary": {"row_count": len(rows)},
+                    **({"lineage": lineage} if lineage else {}),
                 },
             )
         )
@@ -1254,6 +1332,29 @@ async def _run_with_artifact_capture(
         return await operation()
 
 
+def _record_visible_artifact_step_ids(
+    artifact_sink: Optional[InMemoryArtifactSink],
+    react_state: Dict[str, Any],
+    *,
+    action: str,
+    visible_step_id: str,
+) -> None:
+    """Correlate newly captured tool artifacts with the visible execution step."""
+    if artifact_sink is None:
+        return
+    step_map = react_state.setdefault("_report_execution_step_map", {})
+    try:
+        for artifact in artifact_sink.snapshot():
+            captured_step_id = artifact.execution.step_id
+            captured_action = artifact.execution.action or ""
+            if captured_step_id in step_map:
+                continue
+            if captured_action == action or captured_action.startswith(f"{action}."):
+                step_map[captured_step_id] = visible_step_id
+    except Exception:
+        logger.exception("Failed to correlate report artifacts with visible step")
+
+
 async def _assemble_and_persist_turn_report(
     *,
     dialogue: ConversationVo,
@@ -1261,12 +1362,19 @@ async def _assemble_and_persist_turn_report(
     user_input: str,
     final_answer: AgentFinalAnswer,
     artifact_sink: Optional[InMemoryArtifactSink],
+    presentation_bindings: Sequence[Dict[str, Any]] = (),
+    presentation: Optional[Dict[str, Any]] = None,
+    execution_step_map: Optional[Dict[str, str]] = None,
 ) -> Optional[Any]:
     """Persist one captured ReAct turn without changing legacy response behavior."""
     if artifact_sink is None:
         return None
     owner_id = (dialogue.user_name or "").strip()
     if not owner_id or not final_answer.content.strip():
+        return None
+    if not _has_rendered_html_presentation(presentation):
+        # Executed artifacts remain visible in the trace, but without a
+        # rendered presentation this is not a completed report.
         return None
 
     try:
@@ -1282,6 +1390,10 @@ async def _assemble_and_persist_turn_report(
             (line.strip() for line in user_input.splitlines() if line.strip()),
             "Analysis report",
         )[:MAX_REPORT_TITLE_LENGTH]
+        if isinstance(presentation, dict):
+            presentation_title = presentation.get("title")
+            if isinstance(presentation_title, str) and presentation_title.strip():
+                title = presentation_title.strip()[:MAX_REPORT_TITLE_LENGTH]
         coordinates = _turn_report_coordinates(
             dialogue, conv_id, final_answer, artifact_sink
         )
@@ -1294,21 +1406,48 @@ async def _assemble_and_persist_turn_report(
 
         def assemble_and_save():
             artifacts = artifact_sink.snapshot()
+            if execution_step_map:
+                artifacts = [
+                    artifact.model_copy(
+                        update={
+                            "execution": artifact.execution.model_copy(
+                                update={
+                                    "step_id": execution_step_map.get(
+                                        artifact.execution.step_id,
+                                        artifact.execution.step_id,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    for artifact in artifacts
+                ]
             if not artifacts:
                 return None
-            return service.assemble_and_save(
+            assemble_kwargs: Dict[str, Any] = dict(
                 owner_id=owner_id,
                 report_id=report_id,
                 title=title,
                 conv_uid=conv_id,
                 final_content=final_answer.content,
                 artifacts=artifacts,
+                include_chart_blocks=True,
                 metadata={
                     "source": "react_agent",
                     "capture_run_id": artifact_sink.context.run_id,
+                    # A captured artifact run is useful for audit, but is not
+                    # interchangeable with a rendered analysis report.  Persist
+                    # this distinction so consumers can state the accurate
+                    # condition instead of treating every captured run as a
+                    # completed HTML presentation.
+                    "presentation_status": "rendered",
                 },
                 run_id=report_run_id,
             )
+            if presentation_bindings:
+                assemble_kwargs["presentation_bindings"] = presentation_bindings
+                assemble_kwargs["presentation"] = presentation
+            return service.assemble_and_save(**assemble_kwargs)
 
         if not _REPORT_PERSIST_SLOTS.acquire(blocking=False):
             logger.warning("Report persistence capacity is saturated; skipping turn")
@@ -1345,6 +1484,13 @@ def _schedule_turn_report_persistence(
                     user_input=user_input,
                     final_answer=final_answer,
                     artifact_sink=artifact_sink,
+                    presentation_bindings=react_state.get(
+                        "_report_presentation_bindings", ()
+                    ),
+                    presentation=react_state.get("_report_presentation"),
+                    execution_step_map=react_state.get(
+                        "_report_execution_step_map", {}
+                    ),
                 ),
                 timeout=_REPORT_PERSIST_TIMEOUT_SECONDS,
             )
@@ -1525,7 +1671,7 @@ async def _react_agent_stream_impl(
         GptsMemory,
     )
     from dbgpt.agent.expand.actions.react_action import Terminate
-    from dbgpt.agent.expand.react_agent import ReActAgent
+    from dbgpt.agent.expand.tool_calling_agent import ToolCallingReActAgent
     from dbgpt.agent.resource import ToolPack
     from dbgpt.agent.resource.manage import get_resource_manager
     from dbgpt.agent.util.llm.llm import LLMConfig, LLMStrategyType
@@ -1861,6 +2007,11 @@ async def _react_agent_stream_impl(
         "skill_prompt": None,
         "file_path": file_path,
     }
+    required_recommendation_count = _requested_recommendation_count(user_input)
+    if required_recommendation_count is not None:
+        react_state["_report_required_recommendation_count"] = (
+            required_recommendation_count
+        )
 
     # Pre-select skill if skill_name provided in ext_info
     pre_matched_skill = None
@@ -2339,6 +2490,7 @@ print(json.dumps(summary, ensure_ascii=False))
     # ── Import built-in tools from tools/ directory ──
     from dbgpt_app.openapi.api_v1.tools import (
         make_code_interpreter,
+        make_chart_query,
         make_execute_analysis,
         make_execute_skill_script_file,
         make_execute_tool,
@@ -2350,6 +2502,7 @@ print(json.dumps(summary, ensure_ascii=False))
         make_load_tools,
         make_question,
         make_read_file,
+        make_report_evidence_manifest,
         make_shell_interpreter,
         make_sql_query,
         make_todowrite,
@@ -2394,9 +2547,11 @@ print(json.dumps(summary, ensure_ascii=False))
         # No knowledge space connected — use legacy knowledge_retrieve (no-op without resources)
         kb_tool_list = [make_knowledge_retrieve(react_state, knowledge_resources)]
     sql_query_tool = make_sql_query(react_state, database_connector)
+    chart_query_tool = make_chart_query(react_state, database_connector)
     code_interpreter_tool = make_code_interpreter(react_state)
     shell_interpreter_tool = make_shell_interpreter(react_state)
     html_interpreter_tool = make_html_interpreter(react_state, DEFAULT_SKILLS_DIR)
+    report_evidence_manifest_tool = make_report_evidence_manifest(react_state)
     todowrite_tool = make_todowrite(_todo_list, stream_callback)
     question_tool = make_question(react_state, stream_callback)
     # read_file lets the agent read back persisted tool results / snapshots
@@ -2631,6 +2786,29 @@ print(json.dumps(summary, ensure_ascii=False))
     )
     storage_conv.save_to_storage()
     storage_conv.start_new_round()
+    # Load the full conversation history (user question + agent final answer)
+    # before appending the current round, then pass it as historical_dialogues
+    # so multi-turn follow-ups see the previous Q&A (mirrors hermes'
+    # conversation_history passed into the loop).
+    historical_dialogues: List[AgentMessage] = []
+    for _msg in storage_conv.get_history_message():
+        if _msg.type == "human":
+            historical_dialogues.append(AgentMessage(content=_msg.content))
+        elif _msg.type == "ai":
+            historical_dialogues.append(AgentMessage(content=_msg.content))
+        elif _msg.type == "view":
+            # view 消息存的是 history_payload(JSON)，提取 final_content 作为 AI 回答
+            _content = _msg.content
+            try:
+                _payload = (
+                    json.loads(_content) if isinstance(_content, str) else _content
+                )
+                if isinstance(_payload, dict):
+                    _content = _payload.get("final_content") or ""
+            except Exception:
+                pass
+            if _content:
+                historical_dialogues.append(AgentMessage(content=_content))
     storage_conv.add_user_message(user_input)
     context = AgentContext(
         conv_id=conv_id,
@@ -2639,6 +2817,7 @@ print(json.dumps(summary, ensure_ascii=False))
         language="zh",
         temperature=dialogue.temperature or 0.2,
         enable_context_management=True,
+        enable_native_function_calling=True,
     )
 
     # file_ids requests use the public manifest block; legacy file_path and
@@ -2752,7 +2931,22 @@ Please always response in the same language as the user's input language.
    -> Action Input.
 3. Wait for the system to return Observation before deciding on the next step.
 4. **[Mandatory Rule] If the task requires generating an analysis report, you MUST
-call `html_interpreter` for HTML rendering.** By default, generate complete HTML
+first call `report_evidence_manifest`, then call `html_interpreter` for HTML rendering.**
+Use only artifact IDs returned by that manifest: bind every supported KPI, chart,
+or table container separately with `data-dbgpt-artifacts="artifact-id[,artifact-id]"`.
+A table may cite only its underlying SQL/Python/reference evidence: never attach a
+ChartArtifact to `<table>`. Bind a ChartArtifact only to the distinct figure, chart
+container, or image that actually renders that chart.
+In conclusions, wrap every data-bearing number separately in
+`<strong data-dbgpt-artifacts="artifact-id">number</strong>`. Do not attach every
+artifact to every element; use only the evidence that supports that exact object.
+If the manifest includes a `reference_type="knowledge"` artifact that supplied a
+metric definition, formula, business rule, or recommendation rationale, bind that
+KB artifact to that specific explanatory claim or rule. Do not bind KB evidence to
+raw database values unless the knowledge chunk itself is the value's source.
+If the manifest status is empty or an error, report the capture failure; do not
+repeat successful analysis or inspect snapshot directories to guess artifact IDs.
+By default, generate complete HTML
 code yourself and pass it via the `html` parameter (include DOCTYPE, html, head,
 body, styles, and all content). Only use `template_path` mode if the skill
 explicitly provides HTML templates in its `templates/` directory and its
@@ -2807,14 +3001,7 @@ templates.
 3. **execute_skill_script**: Execute the inline script defined in the skill
 (backup). Parameters: {{"skill_name": "skill name", "script_name": "script name",
 "args": {{"parameter name": "parameter value"}}}}
-4. **shell_interpreter**: Execute shell/bash commands (only for non-skill script
-system commands, such as ls, cat, etc.).
-   Parameters: {{"code": "shell command"}}
-   - Each call is independent and does not retain state. If multi-step operations
-are needed, use `&&` or `;` to connect commands.
-   - **Note: Do not use this tool to execute skill scripts**, as it will not
-automatically handle images and data recording.
-5. **html_interpreter**: Render HTML as an interactive web report. This is the ONLY
+4. **html_interpreter**: Render HTML as an interactive web report. This is the ONLY
 way to display reports on the right panel.
    **Default usage (recommended)**: {{"html": "<html>your complete HTML code</html>",
 "title": "report title"}}
@@ -2828,22 +3015,24 @@ to this tool.
 If template_path returns "Template not found", immediately switch to the default
 `html` parameter usage.
    {available_images_hint}
-6. **sql_query**: Execute a read-only SQL query against the selected database.
+5. **sql_query**: Execute a read-only SQL query against the selected database.
 Parameters: {{"sql": "SELECT statement"}}
-7. **todowrite**: Create and manage a structured task list. Use for complex tasks
+5.1. **chart_query**: Execute read-only SQL and return a DB-GPT native interactive chart.
+Parameters: {{"sql": "SELECT statement", "display_type": "response_line_chart", "thought": "chart purpose"}}
+6. **todowrite**: Create and manage a structured task list. Use for complex tasks
 (3+ steps) to plan and track progress. Pass the FULL list every time. Each item:
 {{"content": "description", "status": "pending|in_progress|completed|cancelled",
 "priority": "high|medium|low"}}. Only ONE task in_progress at a time.
 IMPORTANT: You MUST call todowrite again after EACH task completes to update status.
 The user sees progress in real time — never skip an update.
 Parameters: {{"todos": [{{...}}]}}
-8. **question**: Ask the user a question and wait for their response. Use this tool
+7. **question**: Ask the user a question and wait for their response. Use this tool
    when you need user input, clarification, or a decision to proceed. The tool blocks
    until the user answers.
    Parameters: {{"questions": [{{"question": "...", "header": "...", "options": [
    {{"label": "...", "description": "..."}}, ...]}}]}}. Set multiple=true to allow
    multiple selections. The tool returns the user's selected answers.
-9. **terminate**: Return the final answer when the task is completed. Action Input
+8. **terminate**: Return the final answer when the task is completed. Action Input
 must be {{"result": "your final answer content"}}.
 
 ## Task Management
@@ -2900,9 +3089,10 @@ Thought/Action/Action Input format shown above.
                     execute_skill_script,
                     get_skill_resource,
                     execute_skill_script_file_tool,
-                    shell_interpreter_tool,
                     html_interpreter_tool,
+                    report_evidence_manifest_tool,
                     sql_query_tool,
+                    chart_query_tool,
                     todowrite_tool,
                     question_tool,
                     Terminate(),
@@ -2940,11 +3130,41 @@ order, select as needed).
 5. When the task is completed, call the terminate tool to return the final result.
 The Action Input format must be {{"result": "final answer"}}.
 6. **[Mandatory Rule] If there is a requirement for an analysis report, you MUST call
-`html_interpreter` for HTML rendering. When the user requests generating a webpage,
+`report_evidence_manifest` immediately before `html_interpreter` for HTML rendering.
+Use its returned real artifact IDs in `data-dbgpt-artifacts="artifact-id[,artifact-id]"`
+on every supported KPI, chart, and table container separately. A table may cite only
+its underlying SQL/Python/reference evidence: never attach a ChartArtifact to `<table>`;
+bind that artifact only to the distinct figure, chart container, or image that renders it.
+Wrap every number used
+as a conclusion in `<strong data-dbgpt-artifacts="artifact-id">number</strong>`.
+Never bind all artifacts to every element. If the manifest status is empty or an
+error, report the capture failure instead of repeating successful analysis or
+guessing IDs from snapshot files. When the user requests generating a webpage,
 HTML report, or interactive report, the final presentation step must call
 `html_interpreter` to render it. It is forbidden to output HTML using only
-`code_interpreter` and then directly terminate. Correct process: code_interpreter
-writes to .html file -> html_interpreter(file_path=...) renders -> terminate.**
+`code_interpreter` and then directly terminate. Generate the complete HTML in the
+`html_interpreter.html` argument, render it once, then terminate. Do not use Python
+or shell commands to manufacture report artifact IDs or inspect snapshot files.
+For a large analysis, keep the HTML concise: 3–6 KPI/table/chart containers and
+3–5 numeric conclusion claims are enough. Copy the concrete `binding_examples`
+returned by the manifest, replacing only the metric label/value; never create a
+long Python program to construct HTML. If html_interpreter returns a traceability
+binding error, your next action must be `report_evidence_manifest` followed by one
+small, valid inline HTML retry — never terminate with that error.**
+
+When the manifest contains a `reference_type="knowledge"` artifact, bind it only
+to the formula, metric-definition, business-rule, or recommendation-rationale
+claim that it actually supports. Do not use a KB artifact as evidence for a raw SQL
+number unless the knowledge chunk itself is the source of that number.
+
+7. **[Database-report execution rule]** Use the available tools that best fit the
+analysis. `chart_query` returns DB-GPT's native SQL chart when a database chart is
+useful; `code_interpreter` remains available for advanced calculations or custom
+visualizations. Do not use `shell_interpreter` to test an environment, create
+charts, or prepare an HTML report; the shell tool is intentionally unavailable in
+this workflow. Emit exactly ONE
+`Action` and ONE matching `Action Input` per model response. If a previous attempt
+was rejected as an invalid ReAct step, retry with one valid tool action only.
 
 ## Task Management
 For complex tasks that require 3 or more steps, use the `todowrite` tool to create
@@ -3017,12 +3237,10 @@ Parameters: {{"skill_name": "skill name", "resource_path": "resource path"}}
 4. **execute_skill_script**: Execute the inline script defined in the skill.
 Parameters: {{"skill_name": "skill name", "script_name": "script name",
 "args": {{parameters}}}}
-5. **shell_interpreter**: Execute shell/bash commands.
-Parameters: {{"code": "shell command"}}
-6. **code_interpreter**: Execute arbitrary Python code.
+5. **code_interpreter**: Execute arbitrary Python code.
 Parameters: {{"code": "python code string"}}
-7. **load_file**: Load uploaded file info. Parameters: none.
-8. **execute_analysis**: Execute quick analysis on uploaded Excel/CSV file.
+6. **load_file**: Load uploaded file info. Parameters: none.
+7. **execute_analysis**: Execute quick analysis on uploaded Excel/CSV file.
 Parameters: none.
 9. **kb_ls**: List files and directories in the knowledge base.
 Parameters: {{"path": "directory path (optional)"}}
@@ -3036,6 +3254,8 @@ Parameters: {{"path": "file path like src/main.py", "start_line": "start line (o
 Parameters: {{"query": "search query in natural language", "top_k": "number of results (optional)"}}
 {codegraph_section}14. **sql_query**: Execute a read-only SQL query against the selected database.
 Parameters: {{"sql": "SELECT statement"}}
+14.1. **chart_query**: Execute SQL and return a DB-GPT native interactive chart.
+Parameters: {{"sql": "SELECT statement", "display_type": "response_line_chart", "thought": "chart purpose"}}
 15. **load_tools**: Resolve required tools for the selected skill. Parameters: none.
 16. **execute_tool**: Execute a tool by name with JSON args.
 Parameters: {{"tool_name": "tool name", "args": {{parameters}}}}
@@ -3044,7 +3264,12 @@ to display reports on the right panel). Default usage:
 {{"html": "<html>complete HTML code</html>", "title": "title"}}. Template mode:
 {{"template_path": "skill/templates/xxx.html", "data": {{...}}, "title": "title"}}.
 File mode: {{"file_path": "/path/to/report.html"}}
-14. **todowrite**: Create and manage a structured task list. Use for complex tasks
+18. **report_evidence_manifest**: Before generating an analysis HTML report, list
+captured execution artifacts. Bind each KPI/chart/table container separately, and
+wrap every conclusion number in `<strong data-dbgpt-artifacts="artifact-id">`;
+never invent or indiscriminately reuse bindings.
+Parameters: none.
+19. **todowrite**: Create and manage a structured task list. Use for complex tasks
 (3+ steps) to plan and track progress. Pass the FULL list every time. Each item:
 {{"content": "description", "status": "pending|in_progress|completed|cancelled",
 "priority": "high|medium|low"}}. Only ONE task in_progress at a time.
@@ -3112,9 +3337,10 @@ Thought/Action/Action Input format shown above.
                     code_interpreter_tool,
                     load_file_tool,
                     execute_analysis_tool,
-                    shell_interpreter_tool,
                     html_interpreter_tool,
+                    report_evidence_manifest_tool,
                     sql_query_tool,
+                    chart_query_tool,
                     read_file_tool,
                     todowrite_tool,
                     execute_tool_tool,
@@ -3225,7 +3451,18 @@ Thought/Action/Action Input format shown above.
     )
 
     agent_builder = (
-        ReActAgent(max_retry_count=30)
+        # A complete evidence-backed report needs room for data retrieval,
+        # evidence manifest, HTML rendering and termination.  Thirty actions
+        # was routinely exhausted by a multi-part Olist analysis before the
+        # report phase began.
+        ToolCallingReActAgent(
+            max_retry_count=60,
+            # A multi-part report includes independent SQL retrieval, Python
+            # chart rendering, evidence manifest generation and HTML rendering.
+            # The generic 10-minute agent deadline can otherwise terminate a
+            # healthy report during its final presentation phase.
+            max_timeout=900,
+        )
         .bind(context)
         .bind(agent_memory)
         .bind(llm_config)
@@ -3254,20 +3491,17 @@ Thought/Action/Action Input format shown above.
     )
 
     async def run_agent():
-        if artifact_sink is None:
+        async def generate_reply():
             return await agent.generate_reply(
                 received_message=received,
                 sender=agent,
                 stream_callback=stream_callback,
+                historical_dialogues=historical_dialogues,
             )
-        return await _run_with_artifact_capture(
-            artifact_sink,
-            lambda: agent.generate_reply(
-                received_message=received,
-                sender=agent,
-                stream_callback=stream_callback,
-            ),
-        )
+
+        if artifact_sink is None:
+            return await generate_reply()
+        return await _run_with_artifact_capture(artifact_sink, generate_reply)
 
     agent_task = asyncio.create_task(run_agent())
     if agent_task_holder is not None:
@@ -3278,6 +3512,8 @@ Thought/Action/Action Input format shown above.
     ] = {}  # Buffer thinking content for delayed step creation
     pending_action_intentions: Dict[int, str] = {}
     pending_action_reasons: Dict[int, str] = {}
+    # Emit a one-time "task preview" from the model's first "Plan: ..." line.
+    task_plan_emitted = False
     # --- History persistence: collect step data during streaming ---
     history_steps: List[Dict[str, Any]] = []
     current_history_step: Optional[Dict[str, Any]] = None
@@ -3445,12 +3681,15 @@ Thought/Action/Action Input format shown above.
                 pending_thoughts.pop(round_num, [])
                 pending_action_intentions.pop(round_num, None)
                 pending_action_reasons.pop(round_num, None)
-                # ── Auto-complete all remaining todos on terminate ──
-                if _todo_list:
-                    for t in _todo_list:
-                        if t["status"] in ("pending", "in_progress"):
-                            t["status"] = "completed"
-                    yield _sse_event({"type": "plan.update", "tasks": list(_todo_list)})
+                # derisk 参考：terminate 是「模拟 action」，不展示为真实工具 step。
+                # 通知前端移除 terminate 这轮在 thinking_chunk 阶段提前创建的
+                # 「思考中」占位 step（前端 step.meta 里 action=terminate 会过滤）。
+                if round_num in round_step_map:
+                    _stale_id = round_step_map.pop(round_num)
+                    yield step_meta(_stale_id, None, "terminate", None, "terminate")
+                # Do not fabricate plan completion.  Only an explicit
+                # todowrite update can mark a task complete; otherwise an
+                # early terminate must remain visibly incomplete.
                 continue
 
             # ── TodoWrite: emit plan.update SSE and show step card ──
@@ -3573,13 +3812,38 @@ Thought/Action/Action Input format shown above.
                 or pending_action_intentions.pop(round_num, None)
                 or action_output.get("phase")
             )
+            # derisk-style task preview: the first action's notion/intention is a
+            # one-time "接下来要做" overview shown to the user before execution.
+            if not task_plan_emitted and action_intention:
+                task_plan_emitted = True
+                yield _sse_event(
+                    {
+                        "type": "task.preview",
+                        "content": action_intention,
+                        "round": round_num,
+                    }
+                )
             action_reason = normalize_display_text(
                 action_output.get("action_reason")
                 or pending_action_reasons.pop(round_num, None)
             )
-            display_thought = action_intention or summarize_thought(
-                thought_text or thoughts, action
+            display_thought = (
+                normalize_display_text(thoughts or thought_text) or action_intention
             )
+
+            # 解析失败轮次（如 native tool_calls 退回 XML 导致 "No valid ReAct
+            # step found"）：action 为空、无有效工具，跳过 step 展示（derisk 参考：
+            # 无效 action 不展示为噪音 step），仅清理提前创建的「思考中」占位。
+            if not action:
+                pending_thoughts.pop(round_num, [])
+                pending_action_intentions.pop(round_num, None)
+                pending_action_reasons.pop(round_num, None)
+                if round_num in round_step_map:
+                    _stale_id = round_step_map.pop(round_num)
+                    yield _sse_event(
+                        {"type": "step.done", "id": _stale_id, "status": "done"}
+                    )
+                continue
 
             # Use the actual action name as the step title (Manus-style UI)
             action_title = action or f"ReAct Round {round_num}"
@@ -3603,6 +3867,13 @@ Thought/Action/Action Input format shown above.
                 )
                 round_step_map[round_num] = react_step_id
                 yield react_step_event
+
+            _record_visible_artifact_step_ids(
+                artifact_sink,
+                react_state,
+                action=action,
+                visible_step_id=react_step_id,
+            )
 
             # --- History: create step record ---
             action_input_str = None
@@ -3729,9 +4000,7 @@ Thought/Action/Action Input format shown above.
         err_msg = f"React agent failed: {e}"
         fail_running_subagent_history(subagent_history)
         error_answer = AgentFinalAnswer(content=err_msg)
-        coordinates = _turn_report_coordinates(
-            dialogue, conv_id, error_answer, artifact_sink
-        )
+        coordinates = None
         report_id, report_run_id = coordinates or (None, None)
         if report_id and report_run_id:
             error_answer = replace(
@@ -3767,7 +4036,7 @@ Thought/Action/Action Input format shown above.
 
     if reply.action_report and reply.action_report.terminate:
         raw_content = reply.action_report.content or ""
-        # The terminate ActionOutput.content is the full raw LLM text, e.g.:
+        # The terminate ActionOutput.content may be the raw ReAct text, e.g.:
         # "Thought: ...\nAction: terminate\nAction Input: {"result": "..."}"
         # We need to extract the "result" value from Action Input.
         final_content = raw_content
@@ -3788,6 +4057,22 @@ Thought/Action/Action Input format shown above.
                         final_content = parsed_input["result"]
         except Exception:
             pass
+        # native function calling 路径：terminate content 可能是 {"result":...}
+        # (JSON) 或 {'result':...} (Python dict repr)，直接提取 result。
+        if final_content == raw_content:
+            try:
+                _parsed = json.loads(raw_content)
+                if isinstance(_parsed, dict) and "result" in _parsed:
+                    final_content = _parsed["result"]
+            except Exception:
+                try:
+                    import ast
+
+                    _parsed = ast.literal_eval(raw_content)
+                    if isinstance(_parsed, dict) and "result" in _parsed:
+                        final_content = _parsed["result"]
+                except Exception:
+                    pass
     elif reply.action_report:
         # Loop ended without terminate (max retries or timeout).
         # reply.content is raw LLM output containing ReAct prefixes.
@@ -3817,9 +4102,21 @@ Thought/Action/Action Input format shown above.
     else:
         final_content = reply.content or ""
 
+    presentation = react_state.get("_report_presentation")
+    if (
+        react_state.get("_report_html_attempted")
+        and not _has_rendered_html_presentation(presentation)
+    ):
+        final_content = (
+            "分析步骤已完成，但 HTML 分析报告未生成。"
+            f"原因：{react_state.get('_report_html_error', '报告渲染未完成')}"
+            " 请在保留当前已完成分析产物的前提下重试报告渲染。"
+        )
     final_answer = final_answer_assembler.finalize(final_content)
-    coordinates = _turn_report_coordinates(
-        dialogue, conv_id, final_answer, artifact_sink
+    coordinates = (
+        _turn_report_coordinates(dialogue, conv_id, final_answer, artifact_sink)
+        if _has_rendered_html_presentation(presentation)
+        else None
     )
     report_id, report_run_id = coordinates or (None, None)
     if report_id and report_run_id:

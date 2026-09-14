@@ -222,6 +222,9 @@ export const CommonZh: Resources['translation'] = {
   app_in_mind: '没有心仪的应用？去',
   explore: '探索广场',
   new_task: '新建任务',
+  new_task_interrupt_title: '中断当前任务？',
+  new_task_interrupt_content: '当前任务正在执行中，新建任务将中断执行并丢弃当前进度。',
+  new_task_interrupt_ok: '中断并新建',
   all_tasks: '所有任务',
   view_all: '查看全部',
   no_tasks: '暂无历史任务',
@@ -276,6 +279,7 @@ export const CommonZh: Resources['translation'] = {
   copy_url: '单击复制分享链接',
   double_click_open: '双击钉钉打开',
   construct: '应用管理',
+  Setting: '设置',
   chat_online: '在线对话',
   recommend_apps: '热门推荐',
   all_apps: '全部应用',
@@ -796,9 +800,11 @@ export const CommonZh: Resources['translation'] = {
   code_only: '仅代码',
   markdown_only: '仅Markdown',
   Build_Heading_Graph: '建立标题图谱',
-  build_heading_graph_help: '选择图索引后，Markdown 文件（.md）的标题层级（H1→H2→H3）将在同步时自动构建为结构图谱关系。',
+  build_heading_graph_help:
+    '选择图索引后，Markdown 文件（.md）的标题层级（H1→H2→H3）将在同步时自动构建为结构图谱关系。',
   code_graph_not_found: '暂无图谱数据',
-  code_graph_not_found_desc: '该知识库尚未构建结构图谱。请上传 Markdown 文件并启用图索引，同步后将自动构建标题层级图谱。',
+  code_graph_not_found_desc:
+    '该知识库尚未构建结构图谱。请上传 Markdown 文件并启用图索引，同步后将自动构建标题层级图谱。',
   // ── Add Document / Datasource ──
   add_document_title: '添加文档',
   git_repo_already_imported: '代码仓库已导入，不支持重复添加',
