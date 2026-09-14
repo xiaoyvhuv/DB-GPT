@@ -249,6 +249,52 @@ HTML 为兼容预览时，前端会把 `vis-db-chart` artifact 挂载到明确�
 
 这三项在证据抽屉中分别显示。服务端不再把 `0 ms` 解释为整个图表渲染完成，浏览器测量也不会回写篡改已经持久化的服务端执行证据。
 
+#### 8.5.1 协议字段与兼容性
+
+`BaseArtifact` 新增可选 `timing: ArtifactTiming`。字段如下：
+
+```json
+{
+  "duration_ms": 18,
+  "timing": {
+    "server_execution_ms": 18,
+    "derivative_processing_ms": null,
+    "browser_render_ms": null,
+    "derivative_processing_state": "not_applicable",
+    "browser_render_state": "not_measured"
+  }
+}
+```
+
+`duration_ms` 未删除：历史 ReportDocument 和第三方调用方仍可读取它，并将其解释为服务端执行耗时。新前端优先读取 `timing.server_execution_ms`，缺失时回退到 `duration_ms`。这使已保存的历史报告无需迁移即可继续查看。
+
+`derivative_processing_state` 与 `browser_render_state` 取值为：
+
+- `captured`：存在相应的毫秒值；
+- `not_measured`：该阶段存在但本次未采集；
+- `included_in_source_execution`：派生产物耗时已经包括在上游执行中，不能重复计入；
+- `not_applicable`：该 artifact 不具有该阶段。
+
+当状态为 `captured` 时，协议要求对应毫秒值存在；当毫秒值存在时，状态必须是 `captured`。这避免了“有数值但不知道它代表什么”的展示歧义。
+
+#### 8.5.2 后端写入规则
+
+| 产生路径 | 服务端执行 | 派生产物处理 | 浏览器绘制 |
+| --- | --- | --- | --- |
+| `sql_query` / `chart_action.query` | 写入查询耗时 | `not_applicable` | `not_applicable` |
+| `code_interpreter` | 写入 Python 子进程总耗时 | `not_applicable` | `not_applicable` |
+| `chart_action.render` | 写入服务端 Chart spec 生成耗时 | `not_applicable` | `not_measured` |
+| `code_interpreter.image` | 不复制上游 Python 耗时 | `included_in_source_execution` | `not_measured` |
+| 知识库/网页引用 | 写入检索或抓取耗时 | `not_applicable` | `not_applicable` |
+
+`chart_action.render` 的耗时只能描述服务端把查询结果转换为图表协议的时间；它不包含 React、Canvas、SVG 或 iframe 的浏览器工作。Python 图片 artifact 同样不把父 PythonArtifact 的时长再写入自身，避免总耗时在图谱和报告中被双重累计。
+
+#### 8.5.3 浏览器测量边界
+
+`HtmlReportEvidence` 中的 `BrowserTimedNativeChart` 从 React 图表组件挂载开始计时，经过两个 `requestAnimationFrame` 后写入本地 `browserRenderMsByArtifactId` 状态。该数值用于当前证据抽屉的“浏览器绘制”行。
+
+该状态是页面会话级观察值，不会调用后端接口回写到 `ReportDocument`。原因是浏览器性能会受设备、窗口、浏览器版本和页面负载影响；把它写成服务器产物的固定事实会误导后续审计。若未来需要性能观测，应另建按客户端会话存储的 telemetry，而不是覆盖 artifact 的服务端耗时。
+
 ## 9. 运行配置
 
 模型代理配置示例：
