@@ -4,6 +4,8 @@ import type { SessionFileSnapshot } from '@/modules/session-files';
 import AdvancedChart, { createChartConfig } from '@/new-components/charts';
 import MarkDownContext from '@/new-components/common/MarkdownContext';
 import TraceableReportWorkspace from '@/new-components/report/TraceableReportWorkspace';
+import HtmlReportEvidence from '@/new-components/report/HtmlReportEvidence';
+import { printRenderedReport } from '@/new-components/report/report-print';
 import type { SubAgentState, SubAgentStep } from '@/types/subagent';
 import type { AgentCitation } from '@/utils/react-agent-final';
 import {
@@ -2518,13 +2520,11 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
     onPanelViewChange?.(view);
   };
 
-  const handleExportPdf = () => {
+  const handleExportPdf = async () => {
     try {
       const iframe = htmlPreviewRef.current;
       if (iframe?.contentWindow) {
-        iframe.contentWindow.focus();
-        iframe.contentWindow.print();
-        return;
+        if (await printRenderedReport(iframe)) return;
       }
     } catch {
       /* fallback below */
@@ -2557,13 +2557,6 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
       onPanelViewChange?.('execution');
     }
   }, [citations.length, onPanelViewChange, panelView]);
-  useEffect(() => {
-    // Once a task has a persisted report, its HTML file is only an internal
-    // rendering artifact. Keep users in the traceable report workspace.
-    if (reportId && reportRunId && panelView === 'html-preview') {
-      setPanelView('report');
-    }
-  }, [panelView, reportId, reportRunId]);
   const visibleOutputs = useMemo(() => outputs.filter(o => o.output_type !== 'thought'), [outputs]);
 
   const {
@@ -2919,6 +2912,7 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
           'flex min-h-0 flex-1 flex-col',
           isSubAgentExecution ? 'overflow-hidden' : 'overflow-y-auto',
           isSubAgentExecution ||
+            panelView === 'report' ||
             panelView === 'html-preview' ||
             panelView === 'image-preview' ||
             panelView === 'skill-preview' ||
@@ -2928,13 +2922,27 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
         )}
         data-testid='right-panel-content'
       >
-        {reportId &&
+        {reportId && reportRunId && panelView === 'report' ? (
+          <HtmlReportEvidence
+            html={previewArtifact?.type === 'html' ? resolveHtmlImageUrls(
+              typeof previewArtifact.content === 'string'
+                ? previewArtifact.content
+                : previewArtifact.content?.html ||
+                    previewArtifact.content?.content ||
+                    String(previewArtifact.content),
+            ) : ''}
+            reportId={reportId}
+            reportRunId={reportRunId}
+            iframeRef={htmlPreviewRef}
+            onArtifactFocus={onReportArtifactFocus}
+          />
+        ) : reportId &&
         reportRunId &&
-        (panelView === 'report' || panelView === 'evidence-graph') ? (
+        panelView === 'evidence-graph' ? (
           <TraceableReportWorkspace
             reportId={reportId}
             reportRunId={reportRunId}
-            view={panelView === 'report' ? 'report' : 'evidence'}
+            view='evidence'
             onArtifactFocus={onReportArtifactFocus}
           />
         ) : panelView === 'trace' && conversationId ? (
