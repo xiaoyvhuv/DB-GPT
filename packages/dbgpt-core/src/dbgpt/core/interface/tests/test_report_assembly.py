@@ -140,12 +140,11 @@ def test_assembler_retains_failed_artifacts_without_fabricated_blocks() -> None:
     )
 
     assert report.artifacts == [failed]
-    assert len(report.sections) == 1
-    assert isinstance(report.sections[0].blocks[0], TextBlock)
-    assert report.sections[0].blocks[0].evidence == []
+    assert report.sections == []
+    assert report.metadata["task_summary"] == "The query could not be completed."
 
 
-def test_assembler_does_not_bind_summary_without_explicit_support() -> None:
+def test_assembler_does_not_render_unbound_summary_as_report_block() -> None:
     reference = ReferenceArtifact(
         artifact_id="reference-unused",
         execution=EXECUTION,
@@ -166,9 +165,8 @@ def test_assembler_does_not_bind_summary_without_explicit_support() -> None:
         created_at=CREATED_AT,
     )
 
-    block = report.sections[0].blocks[0]
-    assert isinstance(block, TextBlock)
-    assert block.evidence == []
+    assert report.sections == []
+    assert report.metadata["task_summary"] == "A response without an explicit citation."
 
 
 def test_assembler_rejects_failed_explicit_conclusion_support() -> None:

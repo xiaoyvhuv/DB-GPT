@@ -20,7 +20,6 @@ from .report import (
     ReportSection,
     SQLArtifact,
     TableBlock,
-    TextBlock,
 )
 
 
@@ -52,38 +51,36 @@ class ReportAssembler:
             str(item) for item in supporting_artifact_ids if str(item).strip()
         ]
         summary_evidence = self._summary_evidence(artifact_by_id, support_ids)
+        sections: List[ReportSection] = []
+        # A final answer is not, by itself, report evidence. Keep it as task
+        # metadata unless its caller supplied explicit, validated support.
         if summary_evidence:
-            summary: ReportBlock = InsightBlock(
-                block_id="summary-insight",
-                title="Summary",
-                content=content,
-                evidence=summary_evidence,
+            sections.append(
+                ReportSection(
+                    section_id="summary",
+                    title="核心结论",
+                    blocks=[
+                        InsightBlock(
+                            block_id="summary-insight",
+                            title="核心结论",
+                            content=content,
+                            evidence=summary_evidence,
+                        )
+                    ],
+                )
             )
-        else:
-            summary = TextBlock(
-                block_id="summary-text",
-                title="Summary",
-                content=content,
-            )
-
-        sections = [
-            ReportSection(
-                section_id="summary",
-                title="Summary",
-                blocks=[summary],
-            )
-        ]
         detail_blocks = self._detail_blocks(owned_artifacts, artifact_by_id)
         if detail_blocks:
             sections.append(
                 ReportSection(
                     section_id="analysis",
-                    title="Analysis",
+                    title="分析结果",
                     blocks=detail_blocks,
                 )
             )
 
         document_metadata = dict(metadata or {})
+        document_metadata["task_summary"] = content
         document_metadata["assembly"] = {
             "version": 1,
             "artifact_count": len(owned_artifacts),

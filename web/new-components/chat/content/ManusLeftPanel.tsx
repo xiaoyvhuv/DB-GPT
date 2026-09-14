@@ -149,6 +149,11 @@ export interface ManusLeftPanelProps {
   citationIndexes?: number[];
   /** Open the references panel from the answer footer. */
   onReferencesClick?: () => void;
+  /** Persisted evidence report associated with this completed answer. */
+  reportId?: string;
+  reportRunId?: string;
+  /** Open the report in the current Data Assistant right panel. */
+  onReportClick?: () => void;
 }
 
 // Get step icon based on type and status
@@ -562,8 +567,7 @@ const StepCard: React.FC<{
           {
             'opacity-0 translate-y-1': !isVisible,
             'opacity-100 translate-y-0': isVisible,
-            'bg-gradient-to-r from-amber-50/80 via-orange-50/50 to-white dark:from-amber-900/20 dark:via-orange-900/10 dark:to-[#1a1b1e]':
-              true,
+            'bg-gradient-to-r from-amber-50/80 via-orange-50/50 to-white dark:from-amber-900/20 dark:via-orange-900/10 dark:to-[#1a1b1e]': true,
             'border-amber-300/80 dark:border-amber-500/30 shadow-[0_4px_16px_rgba(245,158,11,0.12)] ring-1 ring-amber-200/50 dark:ring-amber-500/20':
               isActive || isWaiting,
             'border-amber-200/60 dark:border-amber-600/20 hover:border-amber-300 hover:shadow-[0_4px_12px_rgba(245,158,11,0.08)]':
@@ -1069,6 +1073,9 @@ const ManusLeftPanel: React.FC<ManusLeftPanelProps> = ({
   taskPlan,
   citationIndexes = [],
   onReferencesClick,
+  reportId,
+  reportRunId,
+  onReportClick,
 }) => {
   const { t } = useTranslation();
   const handleStepClick = useCallback(
@@ -1255,6 +1262,16 @@ const ManusLeftPanel: React.FC<ManusLeftPanelProps> = ({
               >
                 <BookOutlined aria-hidden />
                 查看 {citationIndexes.length} 条参考来源
+              </button>
+            )}
+            {reportId && reportRunId && onReportClick && (
+              <button
+                type='button'
+                onClick={onReportClick}
+                className='mt-3 ml-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-blue-600 transition-colors hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 dark:text-blue-400 dark:hover:bg-blue-500/10 dark:hover:text-blue-300'
+              >
+                <FileTextOutlined aria-hidden />
+                查看分析报告与证据
               </button>
             )}
           </div>

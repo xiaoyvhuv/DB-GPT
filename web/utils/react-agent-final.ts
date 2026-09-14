@@ -19,6 +19,8 @@ export interface AgentCitation {
 export interface AgentFinalAnswer {
   content: string;
   citations: AgentCitation[];
+  reportId?: string;
+  reportRunId?: string;
 }
 
 const MAX_CITATIONS = 10;
@@ -268,10 +270,13 @@ export function decodeFinalEvent(payload: unknown): AgentFinalAnswer {
   const rawContent = typeof payload === 'string' ? payload : typeof record?.content === 'string' ? record.content : '';
   const legacy = splitLegacyReferences(rawContent);
   const structured = normalizeStructuredCitations(record?.citations);
+  const reportId = optionalString(record?.report_id, 128);
+  const reportRunId = optionalString(record?.report_run_id, 64);
 
   return {
     content: legacy.content,
     citations: structured.length > 0 ? structured : legacy.citations,
+    ...(reportId && reportRunId && { reportId, reportRunId }),
   };
 }
 
@@ -296,6 +301,8 @@ export function decodeHistoryAnswer(payload: unknown): AgentFinalAnswer {
   return decodeFinalEvent({
     content: typeof value.final_content === 'string' ? value.final_content : value.content,
     citations: value.citations,
+    report_id: value.report_id,
+    report_run_id: value.report_run_id,
   });
 }
 

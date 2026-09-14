@@ -45,6 +45,7 @@ import TaskPlanCard, { TaskItem } from '@/new-components/chat/content/TaskPlanCa
 import ConfirmDialog from '@/new-components/connector/ConfirmDialog';
 import { AttachedConnector, ConnectorInstance } from '@/new-components/connector/types';
 import { useConfirmPolling } from '@/new-components/connector/useConfirmPolling';
+import OlistAssistantDemo from '@/new-components/report/OlistAssistantDemo';
 import FromTaskBanner from '@/new-components/scheduled-task/FromTaskBanner';
 import SaveAsScheduledTaskDrawer from '@/new-components/scheduled-task/SaveAsScheduledTaskDrawer';
 import type { ChatReplayPayload } from '@/types/scheduled-task';
@@ -202,6 +203,8 @@ interface ChatMessage {
   taskPlan?: TaskItem[];
   attachedConnectors?: AttachedConnector[];
   citations?: AgentCitation[];
+  reportId?: string;
+  reportRunId?: string;
 }
 
 interface ExecutionStep {
@@ -253,7 +256,7 @@ interface Artifact {
   chartConfig?: Partial<ChartConfig>;
 }
 
-type RightPanelTab = 'preview' | 'files' | 'charts' | 'tables' | 'analysis' | 'preprocess' | 'summary';
+type RightPanelTab = 'preview' | 'files' | 'charts' | 'tables' | 'analysis' | 'preprocess' | 'summary' | 'report';
 
 const _convertExecutionToMessageParts = (
   execution:
@@ -487,6 +490,19 @@ const convertToManusFormat = (
 };
 
 const EXAMPLE_CARDS = [
+  {
+    id: 'olist_ecommerce_report',
+    icon: '🛍️',
+    title: 'Olist 巴西电商经营诊断',
+    description: '调用 DeepSeek 分析真实 Olist 数据库，生成可追溯经营与履约报告',
+    query:
+      '请基于当前连接的 Olist 电商数据库完成一次新的经营与履约诊断：只统计已交付订单，分析 2017-01-01 至 2018-08-31 的 GMV、订单量、客单价、运费占比和月度趋势；比较主要商品品类及客户所在州的表现；分析配送时长、逾期交付与客户评分之间的关系；分析支付方式和分期情况；最后给出三条可执行的经营建议。执行 SQL、计算和图表时，必须保留实际产物，供报告的指标、图表和结论绑定证据。',
+    dbName: 'Olist_Ecommerce',
+    modelName: 'deepseek-chat',
+    color: 'from-rose-500/10 to-orange-500/10',
+    borderColor: 'border-rose-200/60 dark:border-rose-800/40',
+    iconBg: 'bg-rose-100 dark:bg-rose-900/40',
+  },
   {
     id: 'walmart_sales',
     icon: '📊',
@@ -1795,9 +1811,11 @@ const Playground: NextPage = () => {
     overrideSkill?: Skill | null,
     overrideDb?: DataSource | null,
     explicitLegacyFile?: LegacyServerFile | null,
+    overrideModel?: string,
   ) => {
     const effectiveSkill = overrideSkill !== undefined ? overrideSkill : selectedSkill;
     const effectiveDb = overrideDb !== undefined ? overrideDb : selectedDb;
+    const effectiveModel = overrideModel || model;
     if (
       (!inputQuery.trim() && !hasSessionFileDrafts && !hasLegacyFile && !explicitLegacyFile) ||
       loading ||
@@ -1957,7 +1975,7 @@ const Playground: NextPage = () => {
       version: filesAttachedThisSend && filesAttachedThisSend.fileIds.length > 0 ? 2 : 1,
       user_input: finalQuery,
       chat_mode: chatMode,
-      model_name: model,
+      model_name: effectiveModel,
       select_param: selectParam,
       temperature: 0.6,
       max_new_tokens: 4000,
@@ -1973,7 +1991,7 @@ const Playground: NextPage = () => {
         body: JSON.stringify({
           conv_uid: currentConvId,
           chat_mode: chatMode,
-          model_name: model,
+          model_name: effectiveModel,
           user_input: finalQuery,
           temperature: 0.6,
           max_new_tokens: 4000,
@@ -2340,6 +2358,8 @@ const Playground: NextPage = () => {
                 ...msg,
                 context: summaryText,
                 citations: finalAnswer.citations,
+                reportId: finalAnswer.reportId,
+                reportRunId: finalAnswer.reportRunId,
                 thinking: false,
               };
             }),
@@ -2355,8 +2375,8 @@ const Playground: NextPage = () => {
             setSummaryPresentationResponseId(responseId);
             setStreamingSummary(firstSummaryCharacter);
             setSummaryComplete(false);
-            setRightPanelTab('summary');
-            setRightPanelView('summary');
+            setRightPanelTab(finalAnswer.reportId && finalAnswer.reportRunId ? 'report' : 'summary');
+            setRightPanelView(finalAnswer.reportId && finalAnswer.reportRunId ? 'report' : 'summary');
             setRightPanelCollapsed(false);
           } else if (finalAnswer.citations.length > 0) {
             setStreamingSummary('');
@@ -2519,7 +2539,7 @@ const Playground: NextPage = () => {
       // No other browser event can interleave between this ref write and the
       // synchronous acquisition at the start of handleStart.
       exampleRunInFlightRef.current = false;
-      await handleStart(translatedQuery, exampleSkill, matchedDb, exampleLegacyFile);
+      await handleStart(translatedQuery, exampleSkill, matchedDb, exampleLegacyFile, example.modelName);
     } catch (err: unknown) {
       message.destroy('example-loading');
       console.error('Example click error:', err);
@@ -2702,6 +2722,8 @@ const Playground: NextPage = () => {
             role: 'view',
             context: finalContent,
             citations: historyAnswer.citations,
+            reportId: historyAnswer.reportId,
+            reportRunId: historyAnswer.reportRunId,
             order: msg.order,
             thinking: false,
             taskPlan: Array.isArray(payload.task_plan)
@@ -2717,6 +2739,8 @@ const Playground: NextPage = () => {
             role: 'view',
             context: cleanFinalContent(historyAnswer.content),
             citations: historyAnswer.citations,
+            reportId: historyAnswer.reportId,
+            reportRunId: historyAnswer.reportRunId,
             order: msg.order,
             thinking: false,
           });
@@ -2861,6 +2885,10 @@ const Playground: NextPage = () => {
     },
   };
 
+  // A report run can be demonstrated inside the data-assistant surface without
+  // changing normal chat state or the standard home-page flow.
+  if (router.query.olist_demo === '1') return <OlistAssistantDemo />;
+
   return (
     <ConfigProvider
       theme={{
@@ -2989,6 +3017,14 @@ const Playground: NextPage = () => {
                         assistantText={roundAssistantText}
                         isAssistantStreaming={isPresentingThisRound && !_summaryComplete}
                         citationIndexes={roundCitations.map(citation => citation.index)}
+                        reportId={round.viewMsg?.reportId}
+                        reportRunId={round.viewMsg?.reportRunId}
+                        onReportClick={() => {
+                          if (round.viewMsg?.id) setActiveViewMsgId(round.viewMsg.id);
+                          setActiveSubAgent(null);
+                          setRightPanelView('report');
+                          setRightPanelCollapsed(false);
+                        }}
                         onReferencesClick={
                           roundCitations.length > 0
                             ? () => {
@@ -3808,6 +3844,21 @@ const Playground: NextPage = () => {
                             : null
                         }
                         onCitationSelect={setSelectedCitationIndex}
+                        reportId={activeViewMsg?.reportId}
+                        reportRunId={activeViewMsg?.reportRunId}
+                        onReportArtifactFocus={stepId => {
+                          if (!activeViewMsg?.id || !execution) return;
+                          setActiveSubAgent(null);
+                          setSelectedStepId(stepId);
+                          setExecutionMap(prev => ({
+                            ...prev,
+                            [activeViewMsg.id!]: {
+                              ...prev[activeViewMsg.id!],
+                              activeStepId: stepId,
+                            },
+                          }));
+                          setRightPanelView('execution');
+                        }}
                         subAgents={parallelSubAgents}
                         onSubAgentClick={agentId => {
                           if (!activeViewMsg?.id) return;

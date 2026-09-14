@@ -191,6 +191,18 @@ class ReActOutputParser:
         if not text:
             return text
 
+        # Some OpenAI-compatible models (including DeepSeek) render the
+        # protocol labels as Markdown emphasis, e.g. ``**Thought**:``.  Those
+        # labels are still at a logical-line boundary and carry exactly the
+        # same ReAct semantics; normalize only the known labels before the
+        # line-oriented parser sees them.  Do not remove Markdown elsewhere:
+        # tool input and ordinary report content may legitimately use it.
+        label_pattern = (
+            r"(?m)^([ \t]*)\*\*"
+            r"(Thought|Phase|Action Intention|Action Reason|Action|Action Input|Observation)"
+            r"\*\*:(?=\s|$)"
+        )
+        text = re.sub(label_pattern, r"\1\2:", text)
         text = self._translate_native_tool_calls(text)
         text = _SPECIAL_TOKEN_PATTERN.sub("", text)
         text = self._strip_vis_thinking_blocks(text)

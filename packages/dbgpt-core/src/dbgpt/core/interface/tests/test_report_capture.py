@@ -513,3 +513,22 @@ def test_capture_api_is_available_from_core_public_api() -> None:
     }
 
     assert all(hasattr(core, name) for name in public_names)
+
+
+def test_in_memory_sink_exposes_cheap_artifact_count() -> None:
+    capture = _capture_module()
+    sink = capture.InMemoryArtifactSink(
+        capture.ArtifactCaptureContext(conv_uid="conv-1", run_id="run-1")
+    )
+
+    assert sink.artifact_count == 0
+    with capture.bind_artifact_sink(sink):
+        capture.capture_reference_artifact(
+            reference_type="model",
+            source_id="model-1",
+            action="model.invoke",
+            duration_ms=1,
+            metadata={"provider": "test"},
+        )
+
+    assert sink.artifact_count == 1

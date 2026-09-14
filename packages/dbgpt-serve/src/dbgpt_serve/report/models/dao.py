@@ -330,8 +330,12 @@ class ReportDao(BaseDao[ReportEntity, dict, dict]):
         report_id: str,
         run_id: str,
         block_id: str,
+        *,
+        limit: int = 50,
     ) -> List[ReportEvidenceDetail]:
         """Return indexed evidence only if its run is owner-visible."""
+        if limit < 1 or limit > 200:
+            raise ValueError("invalid evidence limit")
         with self.session(commit=False) as session:
             if self._run_query(session, owner_id, report_id, run_id).first() is None:
                 return []
@@ -350,6 +354,7 @@ class ReportDao(BaseDao[ReportEntity, dict, dict]):
                     ReportEvidenceEntity.block_id == block_id,
                 )
                 .order_by(ReportEvidenceEntity.ordinal)
+                .limit(limit)
                 .all()
             )
             return [

@@ -55,6 +55,11 @@ export const GET = <Params = any, Response = any, D = any>(
   return ins.get<Params, ApiResponse<Response>>(url, { params, ...config });
 };
 
+/** Fetch an endpoint whose body is not wrapped in DB-GPT's Result envelope. */
+export const GET_RAW = <Response = any, D = any>(url: string, config?: AxiosRequestConfig<D>) => {
+  return ins.get<Response, AxiosResponse<Response>>(url, config);
+};
+
 export const POST = <Data = any, Response = any, D = any>(url: string, data?: Data, config?: AxiosRequestConfig<D>) => {
   return ins.post<Data, ApiResponse<Response>>(url, data, config);
 };
@@ -85,6 +90,7 @@ export * from './evaluate';
 export * from './flow';
 export * from './knowledge';
 export * from './prompt';
+export * from './report';
 export * from './request';
 export * from './tools';
 export * from './user';

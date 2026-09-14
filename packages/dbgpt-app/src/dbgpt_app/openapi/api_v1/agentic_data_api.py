@@ -10,6 +10,8 @@ import tempfile
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import (
@@ -47,12 +49,18 @@ from dbgpt.agent.skill.manage import get_skill_manager
 from dbgpt.component import ComponentType
 from dbgpt.configs.model_config import SKILLS_DIR, resolve_root_path
 from dbgpt.core import PromptTemplate
-from dbgpt.core.interface.report import MAX_REPORT_TITLE_LENGTH
+from dbgpt.core.interface.report import (
+    MAX_REPORT_TITLE_LENGTH,
+    ArtifactContent,
+    SQLArtifact,
+)
 from dbgpt.core.interface.report_capture import (
     ArtifactCaptureContext,
     ArtifactSink,
     InMemoryArtifactSink,
     bind_artifact_sink,
+    sha256_json,
+    sha256_text,
 )
 from dbgpt.model.cluster import WorkerManagerFactory
 from dbgpt.util.json_utils import parse_or_raise_error
@@ -1032,6 +1040,8 @@ def _build_react_history_payload(
     sub_agents: Any,
     input_files: List[Dict[str, Any]],
     citations: Optional[List[Dict[str, Any]]] = None,
+    report_id: Optional[str] = None,
+    report_run_id: Optional[str] = None,
 ) -> str:
     """Serialize the persisted react-agent history payload (version 2).
 
@@ -1041,21 +1051,150 @@ def _build_react_history_payload(
     storage URIs, owner ids, hashes or inspection bodies. ``citations`` comes
     from the final-answer assembler and remains display-safe metadata.
     """
-    return json.dumps(
-        {
-            "version": 2,
-            "protocol_version": 2,
-            "type": "react-agent",
-            "final_content": final_content,
-            "citations": citations or [],
-            "steps": steps,
-            "task_plan": task_plan,
-            "generated_images": generated_images,
-            "sub_agents": sub_agents,
-            "input_files": input_files,
-        },
-        ensure_ascii=False,
-    )
+    value = {
+        "version": 2,
+        "protocol_version": 2,
+        "type": "react-agent",
+        "final_content": final_content,
+        "citations": citations or [],
+        "steps": steps,
+        "task_plan": task_plan,
+        "generated_images": generated_images,
+        "sub_agents": sub_agents,
+        "input_files": input_files,
+    }
+    if report_id and report_run_id:
+        value["report_id"] = report_id
+        value["report_run_id"] = report_run_id
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _turn_report_coordinates(
+    dialogue: ConversationVo,
+    conv_id: str,
+    final_answer: AgentFinalAnswer,
+    artifact_sink: Optional[InMemoryArtifactSink],
+) -> Optional[Tuple[str, str]]:
+    """Return immutable report coordinates only when this turn can produce one."""
+    if (
+        artifact_sink is None
+        or artifact_sink.artifact_count == 0
+        or not (dialogue.user_name or "").strip()
+        or not final_answer.content.strip()
+    ):
+        return None
+    report_token = hashlib.sha256(conv_id.encode("utf-8")).hexdigest()[:40]
+    return f"report-{report_token}", artifact_sink.context.run_id
+
+
+_MARKDOWN_TABLE_SEPARATOR = re.compile(r"^:?-{3,}:?$")
+_MARKDOWN_INTEGER = re.compile(r"^-?(?:0|[1-9]\d*)$")
+_MARKDOWN_FLOAT = re.compile(r"^-?(?:0|[1-9]\d*)\.\d+$")
+
+
+def _parse_markdown_table(markdown: str) -> Optional[Tuple[List[str], List[List[Any]]]]:
+    """Return the first well-formed pipe table emitted by a tool result."""
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    for index in range(len(lines) - 1):
+        header, separator = lines[index : index + 2]
+        if not (header.startswith("|") and header.endswith("|")):
+            continue
+        if not (separator.startswith("|") and separator.endswith("|")):
+            continue
+        columns = [cell.strip() for cell in header[1:-1].split("|")]
+        separators = [cell.strip() for cell in separator[1:-1].split("|")]
+        if not columns or len(columns) != len(separators):
+            continue
+        if not all(_MARKDOWN_TABLE_SEPARATOR.fullmatch(cell) for cell in separators):
+            continue
+
+        rows: List[List[Any]] = []
+        for line in lines[index + 2 :]:
+            if not (line.startswith("|") and line.endswith("|")):
+                break
+            cells = [cell.strip() for cell in line[1:-1].split("|")]
+            if len(cells) != len(columns):
+                break
+            row: List[Any] = []
+            for cell in cells:
+                if _MARKDOWN_INTEGER.fullmatch(cell):
+                    row.append(int(cell))
+                elif _MARKDOWN_FLOAT.fullmatch(cell):
+                    row.append(float(cell))
+                else:
+                    row.append(cell)
+            rows.append(row)
+        return columns, rows
+    return None
+
+
+def _capture_subagent_step_artifact(
+    artifact_sink: Optional[InMemoryArtifactSink], event: Dict[str, Any]
+) -> None:
+    """Capture confirmed parallel SQL steps at their shared event boundary."""
+    if artifact_sink is None or event.get("type") != "agent.step":
+        return
+    if str(event.get("action") or "").lower() != "sql_query":
+        return
+    sql = event.get("sql")
+    agent_id = event.get("agent_id")
+    if not isinstance(sql, str) or not sql.strip() or not isinstance(agent_id, str):
+        return
+
+    parsed_table = None
+    for chunk in event.get("chunks") or []:
+        if not isinstance(chunk, dict) or chunk.get("output_type") != "markdown":
+            continue
+        content = chunk.get("content")
+        if isinstance(content, str):
+            parsed_table = _parse_markdown_table(content)
+            if parsed_table is not None:
+                break
+    if parsed_table is None:
+        return
+
+    columns, rows = parsed_table
+    round_value = event.get("round")
+    try:
+        step_suffix = str(int(round_value))
+    except (TypeError, ValueError):
+        step_suffix = "0"
+    result = {"columns": columns, "rows": rows}
+    try:
+        artifact_sink.record(
+            SQLArtifact(
+                artifact_id=artifact_sink.context.new_artifact_id("sql"),
+                name=str(event.get("intention") or "Sub-agent SQL result"),
+                execution=artifact_sink.context.execution_reference(
+                    action="sql_query", step_id=f"{agent_id}:{step_suffix}"
+                ),
+                created_at=datetime.now(timezone.utc),
+                status="succeeded",
+                duration_ms=0,
+                sql=sql,
+                columns=columns,
+                row_count=len(rows),
+                result=ArtifactContent(
+                    inline=result,
+                    media_type="application/json",
+                    sha256=sha256_json(result),
+                    size=len(json.dumps(result, ensure_ascii=False).encode("utf-8")),
+                ),
+                metadata={
+                    "capture_source": "subagent_stream",
+                    "agent_id": agent_id,
+                    "batch_id": event.get("batch_id"),
+                    "round": round_value,
+                    "input_summary": {
+                        "sql_chars": len(sql),
+                        "sql_sha256": sha256_text(sql),
+                    },
+                    "output_summary": {"row_count": len(rows)},
+                },
+            )
+        )
+    except Exception:
+        logger.warning("Unable to capture sub-agent SQL artifact", exc_info=True)
 
 
 def _sse_event_type(event: Any) -> Optional[str]:
@@ -1143,7 +1282,15 @@ async def _assemble_and_persist_turn_report(
             (line.strip() for line in user_input.splitlines() if line.strip()),
             "Analysis report",
         )[:MAX_REPORT_TITLE_LENGTH]
-        report_token = hashlib.sha256(conv_id.encode("utf-8")).hexdigest()[:40]
+        coordinates = _turn_report_coordinates(
+            dialogue, conv_id, final_answer, artifact_sink
+        )
+        if coordinates is None:
+            return None
+        report_id, report_run_id = coordinates
+        if final_answer.report_id and final_answer.report_run_id:
+            report_id = final_answer.report_id
+            report_run_id = final_answer.report_run_id
 
         def assemble_and_save():
             artifacts = artifact_sink.snapshot()
@@ -1151,7 +1298,7 @@ async def _assemble_and_persist_turn_report(
                 return None
             return service.assemble_and_save(
                 owner_id=owner_id,
-                report_id=f"report-{report_token}",
+                report_id=report_id,
                 title=title,
                 conv_uid=conv_id,
                 final_content=final_answer.content,
@@ -1160,6 +1307,7 @@ async def _assemble_and_persist_turn_report(
                     "source": "react_agent",
                     "capture_run_id": artifact_sink.context.run_id,
                 },
+                run_id=report_run_id,
             )
 
         if not _REPORT_PERSIST_SLOTS.acquire(blocking=False):
@@ -3200,6 +3348,7 @@ Thought/Action/Action Input format shown above.
         ):
             # Sub-agent progress uses a separate event channel so parallel
             # child rounds cannot collide with the lead agent's round map.
+            _capture_subagent_step_artifact(artifact_sink, event)
             update_subagent_history(subagent_history, event)
             yield _sse_event(event)
         elif event_type == "thinking":
@@ -3579,6 +3728,15 @@ Thought/Action/Action Input format shown above.
     except Exception as e:
         err_msg = f"React agent failed: {e}"
         fail_running_subagent_history(subagent_history)
+        error_answer = AgentFinalAnswer(content=err_msg)
+        coordinates = _turn_report_coordinates(
+            dialogue, conv_id, error_answer, artifact_sink
+        )
+        report_id, report_run_id = coordinates or (None, None)
+        if report_id and report_run_id:
+            error_answer = replace(
+                error_answer, report_id=report_id, report_run_id=report_run_id
+            )
         error_payload = _build_react_history_payload(
             final_content=err_msg,
             steps=history_steps,
@@ -3587,8 +3745,9 @@ Thought/Action/Action Input format shown above.
             sub_agents=build_subagent_history_snapshot(subagent_history),
             input_files=input_files_snapshot,
             citations=[],
+            report_id=report_id,
+            report_run_id=report_run_id,
         )
-        error_answer = AgentFinalAnswer(content=err_msg)
         terminal_events = _react_terminal_events(
             storage_conv,
             error_payload,
@@ -3659,6 +3818,14 @@ Thought/Action/Action Input format shown above.
         final_content = reply.content or ""
 
     final_answer = final_answer_assembler.finalize(final_content)
+    coordinates = _turn_report_coordinates(
+        dialogue, conv_id, final_answer, artifact_sink
+    )
+    report_id, report_run_id = coordinates or (None, None)
+    if report_id and report_run_id:
+        final_answer = replace(
+            final_answer, report_id=report_id, report_run_id=report_run_id
+        )
 
     # Persist AI reply with structured history payload
     history_payload = _build_react_history_payload(
@@ -3669,6 +3836,8 @@ Thought/Action/Action Input format shown above.
         sub_agents=build_subagent_history_snapshot(subagent_history),
         input_files=input_files_snapshot,
         citations=[citation.to_dict() for citation in final_answer.citations],
+        report_id=report_id,
+        report_run_id=report_run_id,
     )
     terminal_events = _react_terminal_events(
         storage_conv,

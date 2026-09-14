@@ -69,13 +69,19 @@ class AgentFinalAnswer:
 
     content: str
     citations: Tuple[AgentCitation, ...] = ()
+    report_id: Optional[str] = None
+    report_run_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize fields shared by SSE and conversation history."""
-        return {
+        value = {
             "content": self.content,
             "citations": [citation.to_dict() for citation in self.citations],
         }
+        if self.report_id and self.report_run_id:
+            value["report_id"] = self.report_id
+            value["report_run_id"] = self.report_run_id
+        return value
 
     def to_sse_payload(self) -> Dict[str, Any]:
         """Serialize a complete version 2 final SSE event."""

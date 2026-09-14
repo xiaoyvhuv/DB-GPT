@@ -1,3 +1,4 @@
+export { EvidenceReport } from './EvidenceReport';
 export { ProfessionalReport, default } from './ProfessionalReport';
 
 export type {

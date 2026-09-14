@@ -3,6 +3,7 @@ import markdownComponents, { markdownPlugins, preprocessLaTeX } from '@/componen
 import type { SessionFileSnapshot } from '@/modules/session-files';
 import AdvancedChart, { createChartConfig } from '@/new-components/charts';
 import MarkDownContext from '@/new-components/common/MarkdownContext';
+import TraceableReportWorkspace from '@/new-components/report/TraceableReportWorkspace';
 import type { SubAgentState, SubAgentStep } from '@/types/subagent';
 import type { AgentCitation } from '@/utils/react-agent-final';
 import {
@@ -217,6 +218,11 @@ export interface ManusRightPanelProps {
   subAgentContext?: SubAgentState | null;
   /** Exit the sub-agent process view (return to the main agent timeline). */
   onExitSubAgentView?: () => void;
+  /** Persisted ReportRun for this ordinary agent turn, when it produced artifacts. */
+  reportId?: string;
+  reportRunId?: string;
+  /** Locate a report evidence artifact in the existing execution timeline. */
+  onReportArtifactFocus?: (stepId: string) => void;
 }
 
 export type PanelView =
@@ -226,7 +232,9 @@ export type PanelView =
   | 'image-preview'
   | 'skill-preview'
   | 'summary'
-  | 'references';
+  | 'references'
+  | 'report'
+  | 'evidence-graph';
 
 // Get icon for step type
 const getStepTypeIcon = (type: StepType) => {
@@ -437,6 +445,9 @@ InputFileListItem.displayName = 'InputFileListItem';
 
 const FileListItem: React.FC<{ artifact: ArtifactItem; onClick?: () => void }> = memo(({ artifact, onClick }) => {
   const isImage = artifact.type === 'image' || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(artifact.name);
+  // A persisted ReportRun is the report itself; exposing its implementation
+  // filename makes it look like a second, unrelated deliverable.
+  const displayName = artifact.type === 'html' && /^report\.html$/i.test(artifact.name) ? '分析报告' : artifact.name;
   const imgSrc = isImage && typeof artifact.content === 'string' ? resolveImageUrl(artifact.content) : null;
 
   return (
@@ -462,7 +473,7 @@ const FileListItem: React.FC<{ artifact: ArtifactItem; onClick?: () => void }> =
         </div>
       )}
       <div className='min-w-0 flex-1'>
-        <div className='text-sm font-medium text-gray-800 dark:text-gray-200 truncate'>{artifact.name}</div>
+        <div className='text-sm font-medium text-gray-800 dark:text-gray-200 truncate'>{displayName}</div>
         <div className='text-[11px] text-gray-400 dark:text-gray-500 flex items-center gap-1.5 mt-0.5'>
           <span>{getArtifactTypeLabel(artifact.type)}</span>
           {artifact.size != null && (
@@ -2482,6 +2493,9 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
   onSubAgentClick,
   subAgentContext,
   onExitSubAgentView,
+  reportId,
+  reportRunId,
+  onReportArtifactFocus,
 }) => {
   const { t } = useTranslation();
   const [inputCollapsed, setInputCollapsed] = useState(false);
@@ -2533,6 +2547,13 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
       onPanelViewChange?.('execution');
     }
   }, [citations.length, onPanelViewChange, panelView]);
+  useEffect(() => {
+    // Once a task has a persisted report, its HTML file is only an internal
+    // rendering artifact. Keep users in the traceable report workspace.
+    if (reportId && reportRunId && panelView === 'html-preview') {
+      setPanelView('report');
+    }
+  }, [panelView, reportId, reportRunId]);
   const visibleOutputs = useMemo(() => outputs.filter(o => o.output_type !== 'thought'), [outputs]);
 
   const {
@@ -2713,7 +2734,12 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
       )}
 
       {/* View Toggle Tabs */}
-      {(totalFileCount > 0 || previewArtifact || skillName || !!summaryContent || citations.length > 0) && (
+      {(totalFileCount > 0 ||
+        previewArtifact ||
+        skillName ||
+        !!summaryContent ||
+        citations.length > 0 ||
+        (reportId && reportRunId)) && (
         <div className='flex flex-shrink-0 items-center gap-0 overflow-x-auto border-b border-gray-200 bg-white px-5 dark:border-gray-800 dark:bg-[#111217]'>
           <button
             onClick={() => setPanelView('execution')}
@@ -2784,6 +2810,40 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
               )}
             </button>
           )}
+          {reportId && reportRunId && (
+            <button
+              onClick={() => setPanelView('report')}
+              className={classNames(
+                'px-4 py-2.5 text-xs font-medium transition-colors relative whitespace-nowrap',
+                panelView === 'report'
+                  ? 'text-gray-900 dark:text-gray-100'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+              )}
+            >
+              <BarChartOutlined className='mr-1.5' />
+              分析报告
+              {panelView === 'report' && (
+                <div className='absolute bottom-0 left-0 right-0 h-[2px] rounded-full bg-gray-900 dark:bg-gray-100' />
+              )}
+            </button>
+          )}
+          {reportId && reportRunId && (
+            <button
+              onClick={() => setPanelView('evidence-graph')}
+              className={classNames(
+                'px-4 py-2.5 text-xs font-medium transition-colors relative whitespace-nowrap',
+                panelView === 'evidence-graph'
+                  ? 'text-gray-900 dark:text-gray-100'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+              )}
+            >
+              <ApartmentOutlined className='mr-1.5' />
+              证据图谱
+              {panelView === 'evidence-graph' && (
+                <div className='absolute bottom-0 left-0 right-0 h-[2px] rounded-full bg-gray-900 dark:bg-gray-100' />
+              )}
+            </button>
+          )}
           {citations.length > 0 && (
             <button
               onClick={() => setPanelView('references')}
@@ -2804,7 +2864,7 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
               )}
             </button>
           )}
-          {previewArtifact && (
+          {previewArtifact && !(reportId && reportRunId && previewArtifact.type === 'html') && (
             <button
               onClick={() => setPanelView(previewArtifact.type === 'image' ? 'image-preview' : 'html-preview')}
               className={classNames(
@@ -2838,7 +2898,16 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
         )}
         data-testid='right-panel-content'
       >
-        {panelView === 'references' && citations.length > 0 ? (
+        {reportId &&
+        reportRunId &&
+        (panelView === 'report' || panelView === 'evidence-graph') ? (
+          <TraceableReportWorkspace
+            reportId={reportId}
+            reportRunId={reportRunId}
+            view={panelView === 'report' ? 'report' : 'evidence'}
+            onArtifactFocus={onReportArtifactFocus}
+          />
+        ) : panelView === 'references' && citations.length > 0 ? (
           <ReferencesPanel
             citations={citations}
             selectedCitationIndex={selectedCitationIndex}
