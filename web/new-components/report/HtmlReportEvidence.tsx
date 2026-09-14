@@ -185,8 +185,13 @@ const bridgeHtml = (html: string) => {
   return /<\/head\s*>/i.test(html) ? html.replace(/<\/head\s*>/i, `${bridge}</head>`) : `${bridge}${html}`;
 };
 
+const formatMilliseconds = (duration?: number) => {
+  if (duration === undefined || duration === null) return '未采集';
+  return duration === 0 ? '< 1 ms' : `${duration} ms`;
+};
+
 function formatArtifactDuration(artifact: ReportArtifact) {
-  const duration = artifact.duration_ms;
+  const duration = artifact.timing?.server_execution_ms ?? artifact.duration_ms;
   if (artifact.execution.action === 'chart_action.render') {
     if (duration === 0) return '服务端图表规格生成 < 1 ms；浏览器绘制未采集';
     if (duration === undefined || duration === null) return '服务端图表规格生成未采集；浏览器绘制未采集';
@@ -198,10 +203,27 @@ function formatArtifactDuration(artifact: ReportArtifact) {
   return duration === undefined || duration === null ? '-' : `${duration} ms`;
 }
 
-const ArtifactDetail: React.FC<{ artifact: ReportArtifact; onFocus?: (stepId: string) => void }> = ({ artifact, onFocus }) => (
+const derivativeTiming = (artifact: ReportArtifact) => {
+  const timing = artifact.timing;
+  if (timing?.derivative_processing_state === 'captured') return formatMilliseconds(timing.derivative_processing_ms);
+  if (timing?.derivative_processing_state === 'included_in_source_execution') return '已包含在上游执行中';
+  if (timing?.derivative_processing_state === 'not_measured') return '未单独采集';
+  if (artifact.execution.action === 'code_interpreter.image') return '已包含在上游 Python 执行中';
+  return '不适用';
+};
+
+const browserTiming = (artifact: ReportArtifact, browserRenderMs?: number) => {
+  if (browserRenderMs !== undefined) return `${formatMilliseconds(browserRenderMs)}（本次浏览器绘制）`;
+  const timing = artifact.timing;
+  if (timing?.browser_render_state === 'captured') return formatMilliseconds(timing.browser_render_ms);
+  if (timing?.browser_render_state === 'not_measured' || artifact.type === 'chart') return '未采集';
+  return '不适用';
+};
+
+const ArtifactDetail: React.FC<{ artifact: ReportArtifact; browserRenderMs?: number; onFocus?: (stepId: string) => void }> = ({ artifact, browserRenderMs, onFocus }) => (
   <article className='rounded-xl border border-slate-200 p-4 dark:border-slate-700'>
     <div className='flex items-start justify-between gap-3'><div><p className='text-[11px] font-bold uppercase text-blue-600'>{artifact.type}</p><h3 className='mt-1 break-all text-sm font-semibold text-slate-900 dark:text-white'>{artifact.name || artifact.artifact_id}</h3></div><span className='rounded-full bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700'>{artifact.status || 'captured'}</span></div>
-    <dl className='mt-4 grid grid-cols-[92px_1fr] gap-y-2 text-xs text-slate-600 dark:text-slate-300'><dt>Run ID</dt><dd className='break-all'>{artifact.execution.run_id || '-'}</dd><dt>执行操作</dt><dd>{artifact.execution.action || '-'}</dd><dt>耗时</dt><dd>{formatArtifactDuration(artifact)}</dd><dt>数据源</dt><dd>{artifact.database || artifact.source_name || '-'}</dd></dl>
+    <dl className='mt-4 grid grid-cols-[104px_1fr] gap-y-2 text-xs text-slate-600 dark:text-slate-300'><dt>Run ID</dt><dd className='break-all'>{artifact.execution.run_id || '-'}</dd><dt>执行操作</dt><dd>{artifact.execution.action || '-'}</dd><dt>服务端执行</dt><dd>{formatArtifactDuration(artifact)}</dd><dt>派生产物处理</dt><dd>{derivativeTiming(artifact)}</dd><dt>浏览器绘制</dt><dd>{browserTiming(artifact, browserRenderMs)}</dd><dt>数据源</dt><dd>{artifact.database || artifact.source_name || '-'}</dd></dl>
     {artifact.sql && <><h4 className='mt-4 text-xs font-semibold text-slate-700 dark:text-slate-200'>执行 SQL</h4><pre className='mt-2 max-h-48 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-50'>{text(artifact.sql)}</pre></>}
     {artifact.code && <><h4 className='mt-4 text-xs font-semibold text-slate-700 dark:text-slate-200'>执行 {artifact.language || 'Python'}</h4><pre className='mt-2 max-h-48 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-50'>{text(artifact.code)}</pre></>}
     {artifact.reference_type && <><h4 className='mt-4 text-xs font-semibold text-slate-700 dark:text-slate-200'>引用来源</h4><div className='mt-2 rounded-lg bg-teal-50 p-3 text-xs text-teal-950 dark:bg-teal-500/10 dark:text-teal-100'><p className='font-semibold'>{artifact.source_name || artifact.source_id || artifact.reference_type}</p>{artifact.uri && <p className='mt-1 break-all text-teal-800 dark:text-teal-200'>{artifact.uri}</p>}{artifact.excerpt && <p className='mt-2 whitespace-pre-wrap leading-5'>{text(artifact.excerpt)}</p>}</div></>}
@@ -209,6 +231,21 @@ const ArtifactDetail: React.FC<{ artifact: ReportArtifact; onFocus?: (stepId: st
     {onFocus && artifact.execution.step_id && <button type='button' onClick={() => onFocus(artifact.execution.step_id)} className='mt-4 w-full rounded-lg bg-blue-600 py-2.5 text-xs font-semibold text-white hover:bg-blue-700'>定位到执行步骤</button>}
   </article>
 );
+
+const BrowserTimedNativeChart: React.FC<{ artifactId: string; spec: NativeChartSpec; onRendered: (artifactId: string, durationMs: number) => void }> = ({ artifactId, spec, onRendered }) => {
+  const startedAt = useRef<number>();
+  useEffect(() => {
+    startedAt.current = performance.now();
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        onRendered(artifactId, Math.max(0, Math.round(performance.now() - (startedAt.current || performance.now()))));
+      });
+    });
+    return () => { cancelAnimationFrame(firstFrame); if (secondFrame) cancelAnimationFrame(secondFrame); };
+  }, [artifactId, onRendered]);
+  return <AutoChart data={spec.data as Datum[]} chartType={getChartType((spec.type || 'response_table') as Parameters<typeof getChartType>[0])} showControls={false} />;
+};
 
 export const HtmlReportEvidence: React.FC<Props> = ({ html, reportId, reportRunId, iframeRef, onArtifactFocus }) => {
   const ownedIframeRef = useRef<HTMLIFrameElement>(null);
@@ -218,6 +255,7 @@ export const HtmlReportEvidence: React.FC<Props> = ({ html, reportId, reportRunI
   const [selection, setSelection] = useState<{ artifactIds: string[]; elementTag?: string; blockId?: string; claimId?: string; label: string }>();
   const [iframeDocument, setIframeDocument] = useState<Document>();
   const [nativeChartMounts, setNativeChartMounts] = useState<NativeChartMount[]>([]);
+  const [browserRenderMsByArtifactId, setBrowserRenderMsByArtifactId] = useState<Record<string, number>>({});
   const [iframeHeight, setIframeHeight] = useState<number>();
   useEffect(() => { let alive = true; const load = async () => { let lastError = '报告证据暂不可用'; for (let attempt = 0; attempt < 5 && alive; attempt += 1) { try { const result = await getStandaloneReportRun(reportId, reportRunId); if (result.success) { setRun(result.data); setError(''); return; } lastError = result.err_msg || lastError; } catch (reason) { lastError = reason instanceof Error ? reason.message : lastError; } await new Promise(resolve => window.setTimeout(resolve, 600 * (attempt + 1))); } if (alive) setError(lastError); }; void load(); return () => { alive = false; }; }, [reportId, reportRunId]);
   const sendArtifactTypes = useCallback(() => {
@@ -249,6 +287,7 @@ export const HtmlReportEvidence: React.FC<Props> = ({ html, reportId, reportRunI
     let alive = true;
     setIframeDocument(undefined);
     setNativeChartMounts([]);
+    setBrowserRenderMsByArtifactId({});
     setIframeHeight(undefined);
     setRuntimeReadyHtml(reportHtml);
     void inlineChartRuntimes(reportHtml).then(nextHtml => {
@@ -256,6 +295,9 @@ export const HtmlReportEvidence: React.FC<Props> = ({ html, reportId, reportRunI
     });
     return () => { alive = false; };
   }, [reportHtml]);
+  const onNativeChartRendered = useCallback((artifactId: string, durationMs: number) => {
+    setBrowserRenderMsByArtifactId(previous => previous[artifactId] === durationMs ? previous : { ...previous, [artifactId]: durationMs });
+  }, []);
   const presentationStatus = String(run?.document.metadata?.presentation_status || '');
   const noPresentationMessage = presentationStatus === 'not_generated'
     ? '本轮仅保存了执行证据，未完成 HTML 报告生成。请重新执行或从最后一个失败步骤继续。'
@@ -333,8 +375,8 @@ export const HtmlReportEvidence: React.FC<Props> = ({ html, reportId, reportRunI
     setNativeChartMounts(mounts);
   }, [iframeDocument, nativeCharts]);
   return <div className='flex h-full min-h-0 bg-slate-100 dark:bg-[#111217]'>
-    <div className='min-w-0 flex-1 overflow-auto'>{runtimeReadyHtml.trim() ? <iframe ref={reportIframeRef} onLoad={onIframeLoad} title='分析报告' srcDoc={bridgeHtml(resolveReportAssetUrls(runtimeReadyHtml))} sandbox='allow-scripts allow-same-origin allow-modals' className='block w-full border-0 bg-white' style={{ height: iframeHeight ? `${iframeHeight}px` : 320 }} /> : <div className='grid h-full min-h-[360px] place-items-center p-8 text-center'><div><p className='text-sm font-medium text-slate-700 dark:text-slate-200'>本轮未生成 HTML 分析报告</p><p className='mt-2 text-xs text-slate-500'>{error || noPresentationMessage}</p></div></div>}{nativeChartMounts.map(({ artifact, spec, host }) => createPortal(<AutoChart data={spec.data as Datum[]} chartType={getChartType((spec.type || 'response_table') as Parameters<typeof getChartType>[0])} showControls={false} />, host, artifact.artifact_id))}</div>
-    {selection && <aside className='z-10 w-[420px] shrink-0 overflow-y-auto border-l border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-[#191a1f]'><header className='sticky top-0 border-b border-slate-100 bg-white px-5 py-4 dark:border-slate-800 dark:bg-[#191a1f]'><div className='flex items-start justify-between gap-3'><div><p className='text-xs font-bold text-blue-600'>证据详情</p><h2 className='mt-1 text-base font-semibold text-slate-900 dark:text-white'>{selection.label || '报告内容'}</h2></div><button type='button' onClick={() => setSelection(undefined)} className='rounded px-2 text-xl text-slate-400 hover:bg-slate-100'>×</button></div></header><div className='space-y-4 p-5'>{!run && <p className='text-sm text-slate-500'>{error || '正在加载证据…'}</p>}{run && !artifacts.length && <p className='rounded-lg bg-amber-50 p-3 text-sm text-amber-800'>该报告元素引用的证据不存在于本次运行中。</p>}{artifacts.map(artifact => <ArtifactDetail key={artifact.artifact_id} artifact={artifact} onFocus={onArtifactFocus} />)}</div></aside>}
+    <div className='min-w-0 flex-1 overflow-auto'>{runtimeReadyHtml.trim() ? <iframe ref={reportIframeRef} onLoad={onIframeLoad} title='分析报告' srcDoc={bridgeHtml(resolveReportAssetUrls(runtimeReadyHtml))} sandbox='allow-scripts allow-same-origin allow-modals' className='block w-full border-0 bg-white' style={{ height: iframeHeight ? `${iframeHeight}px` : 320 }} /> : <div className='grid h-full min-h-[360px] place-items-center p-8 text-center'><div><p className='text-sm font-medium text-slate-700 dark:text-slate-200'>本轮未生成 HTML 分析报告</p><p className='mt-2 text-xs text-slate-500'>{error || noPresentationMessage}</p></div></div>}{nativeChartMounts.map(({ artifact, spec, host }) => createPortal(<BrowserTimedNativeChart artifactId={artifact.artifact_id} spec={spec} onRendered={onNativeChartRendered} />, host, artifact.artifact_id))}</div>
+    {selection && <aside className='z-10 w-[420px] shrink-0 overflow-y-auto border-l border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-[#191a1f]'><header className='sticky top-0 border-b border-slate-100 bg-white px-5 py-4 dark:border-slate-800 dark:bg-[#191a1f]'><div className='flex items-start justify-between gap-3'><div><p className='text-xs font-bold text-blue-600'>证据详情</p><h2 className='mt-1 text-base font-semibold text-slate-900 dark:text-white'>{selection.label || '报告内容'}</h2></div><button type='button' onClick={() => setSelection(undefined)} className='rounded px-2 text-xl text-slate-400 hover:bg-slate-100'>×</button></div></header><div className='space-y-4 p-5'>{!run && <p className='text-sm text-slate-500'>{error || '正在加载证据…'}</p>}{run && !artifacts.length && <p className='rounded-lg bg-amber-50 p-3 text-sm text-amber-800'>该报告元素引用的证据不存在于本次运行中。</p>}{artifacts.map(artifact => <ArtifactDetail key={artifact.artifact_id} artifact={artifact} browserRenderMs={browserRenderMsByArtifactId[artifact.artifact_id]} onFocus={onArtifactFocus} />)}</div></aside>}
     {!selection && <div className='pointer-events-none absolute bottom-5 right-5 max-w-xs rounded-xl border border-blue-100 bg-white/95 p-3 text-xs leading-5 text-slate-600 shadow-lg dark:border-blue-500/30 dark:bg-[#191a1f]/95 dark:text-slate-300'>{error ? '当前报告证据尚不可用。' : '带“证据”标记的指标、图表和结论可点击查看其执行依据。'}</div>}
   </div>;
 };

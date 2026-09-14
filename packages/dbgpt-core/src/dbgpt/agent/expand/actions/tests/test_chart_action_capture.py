@@ -83,6 +83,11 @@ async def test_chart_action_captures_sql_to_chart_dependency(monkeypatch) -> Non
     }
     assert isinstance(chart, ChartArtifact)
     assert chart.input_artifact_ids == [sql.artifact_id]
+    assert sql.timing is not None
+    assert sql.timing.server_execution_ms == sql.duration_ms
+    assert chart.timing is not None
+    assert chart.timing.server_execution_ms == chart.duration_ms
+    assert chart.timing.browser_render_state == "not_measured"
     assert chart.output is not None
     assert chart.output.inline == result.view
     assert chart.output.sha256 == sha256_text(result.view)

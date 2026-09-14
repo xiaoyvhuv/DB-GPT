@@ -58,6 +58,32 @@ def test_capture_context_generates_correlated_unique_identifiers() -> None:
     assert second.step_id == "python-second-step-token"
 
 
+def test_artifact_keeps_server_derivative_and_browser_timing_separate() -> None:
+    artifact = SQLArtifact(
+        artifact_id="sql-timing-1",
+        execution=_capture_module().ArtifactCaptureContext(
+            conv_uid="conv-1", run_id="run-1"
+        ).execution_reference(action="sql_query", step_id="step-1"),
+        created_at=datetime(2026, 8, 23, 12, 0, 0),
+        status="succeeded",
+        duration_ms=12,
+        timing={
+            "server_execution_ms": 12,
+            "derivative_processing_state": "not_applicable",
+            "browser_render_state": "not_applicable",
+        },
+        sql="SELECT 1 AS value",
+        columns=["value"],
+        row_count=1,
+        result=ArtifactContent(inline=[[1]]),
+    )
+
+    assert artifact.duration_ms == 12
+    assert artifact.timing.server_execution_ms == 12
+    assert artifact.timing.derivative_processing_ms is None
+    assert artifact.timing.browser_render_ms is None
+
+
 def test_reference_capture_is_bounded_and_keeps_complete_content_hash() -> None:
     capture = _capture_module()
     sink = capture.InMemoryArtifactSink(

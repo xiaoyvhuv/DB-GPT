@@ -10,6 +10,7 @@ from typing import Any, Optional, Sequence
 
 from dbgpt.core.interface.report import (
     ArtifactContent,
+    ArtifactTiming,
     ChartArtifact,
     PythonArtifact,
     SQLArtifact,
@@ -127,6 +128,7 @@ def capture_sql_execution(
             created_at=datetime.now(timezone.utc),
             status="failed" if failed else "succeeded",
             duration_ms=max(0, duration_ms),
+            timing=ArtifactTiming(server_execution_ms=max(0, duration_ms)),
             error=_bounded_error(error),
             sql=sql,
             database=database,
@@ -184,6 +186,7 @@ def capture_python_execution(
             created_at=datetime.now(timezone.utc),
             status=status,
             duration_ms=max(0, duration_ms),
+            timing=ArtifactTiming(server_execution_ms=max(0, duration_ms)),
             error=_bounded_error(error),
             code=code,
             exit_code=exit_code,
@@ -237,6 +240,10 @@ def capture_generated_chart(
             created_at=datetime.now(timezone.utc),
             status="succeeded",
             duration_ms=0,
+            timing=ArtifactTiming(
+                derivative_processing_state="included_in_source_execution",
+                browser_render_state="not_measured",
+            ),
             name=filename,
             chart_type="image",
             spec={"source": "code_interpreter", "filename": filename},

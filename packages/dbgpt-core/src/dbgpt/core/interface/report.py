@@ -83,6 +83,42 @@ class ArtifactContent(_ProtocolModel):
         return self
 
 
+TimingMeasurementState = Literal[
+    "captured",
+    "not_measured",
+    "included_in_source_execution",
+    "not_applicable",
+]
+
+
+class ArtifactTiming(_ProtocolModel):
+    """Timing dimensions with explicit measurement semantics.
+
+    ``duration_ms`` remains the legacy server-side duration.  This structure
+    makes clear that a derivative file or client-side canvas paint is not the
+    same operation and must not inherit that value.
+    """
+
+    server_execution_ms: Optional[int] = Field(default=None, ge=0)
+    derivative_processing_ms: Optional[int] = Field(default=None, ge=0)
+    browser_render_ms: Optional[int] = Field(default=None, ge=0)
+    derivative_processing_state: TimingMeasurementState = "not_applicable"
+    browser_render_state: TimingMeasurementState = "not_applicable"
+
+    @model_validator(mode="after")
+    def validate_measurement_states(self) -> "ArtifactTiming":
+        checks = (
+            ("derivative_processing", self.derivative_processing_ms, self.derivative_processing_state),
+            ("browser_render", self.browser_render_ms, self.browser_render_state),
+        )
+        for name, value, state in checks:
+            if value is not None and state != "captured":
+                raise ValueError(f"{name}_ms requires captured state")
+            if value is None and state == "captured":
+                raise ValueError(f"captured {name} requires a duration")
+        return self
+
+
 class BaseArtifact(_ProtocolModel):
     """Fields shared by all executed artifact variants."""
 
@@ -93,6 +129,7 @@ class BaseArtifact(_ProtocolModel):
     created_at: datetime
     status: Optional[Literal["succeeded", "failed", "cancelled", "timed_out"]] = None
     duration_ms: Optional[int] = Field(default=None, ge=0)
+    timing: Optional[ArtifactTiming] = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -124,7 +161,7 @@ class BaseArtifact(_ProtocolModel):
     def serialize_versioned_fields(self, handler):
         """Keep legacy v1 artifact JSON free of absent v2-only fields."""
         data = handler(self)
-        for field_name in ("status", "duration_ms", "error", "stderr"):
+        for field_name in ("status", "duration_ms", "timing", "error", "stderr"):
             if data.get(field_name) is None:
                 data.pop(field_name, None)
         return data
@@ -729,6 +766,7 @@ def _find_duplicate(values: List[str]) -> Optional[str]:
 __all__ = [
     "Artifact",
     "ArtifactContent",
+    "ArtifactTiming",
     "ChartArtifact",
     "ChartBlock",
     "Claim",
@@ -760,6 +798,7 @@ __all__ = [
     "TableBlock",
     "TextSegment",
     "TextBlock",
+    "TimingMeasurementState",
     "VerificationMethod",
     "VerificationStatus",
 ]

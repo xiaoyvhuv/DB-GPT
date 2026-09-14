@@ -10,7 +10,12 @@ from typing import Any, Dict, List, Optional
 from dbgpt._private.pydantic import BaseModel, Field, model_to_dict, model_to_json
 from dbgpt.vis.tags.vis_chart import Vis, VisChart
 
-from ....core.interface.report import ArtifactContent, ChartArtifact, SQLArtifact
+from ....core.interface.report import (
+    ArtifactContent,
+    ArtifactTiming,
+    ChartArtifact,
+    SQLArtifact,
+)
 from ....core.interface.report_capture import (
     get_current_artifact_sink,
     sha256_json,
@@ -84,6 +89,7 @@ def _capture_sql_dataframe(param: "SqlInput", db, data_df, duration_ms: int):
                 created_at=datetime.now(timezone.utc),
                 status="succeeded",
                 duration_ms=duration_ms,
+                timing=ArtifactTiming(server_execution_ms=duration_ms),
                 sql=param.sql,
                 database=str(getattr(db, "_db_name", "")) or None,
                 display_type=param.display_type,
@@ -127,6 +133,7 @@ def _capture_sql_failure(param: "SqlInput", db, duration_ms: int, error: str) ->
                 created_at=datetime.now(timezone.utc),
                 status="failed",
                 duration_ms=duration_ms,
+                timing=ArtifactTiming(server_execution_ms=duration_ms),
                 error=error[:_MAX_CAPTURE_ERROR_CHARS],
                 sql=param.sql,
                 database=str(getattr(db, "_db_name", "")) or None,
@@ -196,6 +203,10 @@ def _capture_chart_render(
                 created_at=datetime.now(timezone.utc),
                 status="failed" if failed else "succeeded",
                 duration_ms=duration_ms,
+                timing=ArtifactTiming(
+                    server_execution_ms=duration_ms,
+                    browser_render_state="not_measured",
+                ),
                 error=(error[:_MAX_CAPTURE_ERROR_CHARS] if error is not None else None),
                 chart_type=param.display_type,
                 spec=spec or {"display_type": param.display_type},

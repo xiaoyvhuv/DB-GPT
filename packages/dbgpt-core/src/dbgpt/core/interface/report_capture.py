@@ -44,6 +44,7 @@ from .report import (
     MAX_STEP_ID_LENGTH,
     MAX_TASK_ID_LENGTH,
     Artifact,
+    ArtifactTiming,
     ExecutionReference,
     ReferenceArtifact,
 )
@@ -415,6 +416,7 @@ def capture_reference_artifact(
             created_at=datetime.now(timezone.utc),
             status=status,
             duration_ms=max(0, duration_ms),
+            timing=ArtifactTiming(server_execution_ms=max(0, duration_ms)),
             error=error[:MAX_REFERENCE_EXCERPT_CHARS] if error is not None else None,
             reference_type=reference_type,
             source_id=str(source_id) if source_id is not None else "",

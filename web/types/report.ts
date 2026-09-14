@@ -48,12 +48,27 @@ export interface ArtifactContent {
   size?: number;
 }
 
+export type TimingMeasurementState =
+  | 'captured'
+  | 'not_measured'
+  | 'included_in_source_execution'
+  | 'not_applicable';
+
+export interface ArtifactTiming {
+  server_execution_ms?: number;
+  derivative_processing_ms?: number;
+  browser_render_ms?: number;
+  derivative_processing_state: TimingMeasurementState;
+  browser_render_state: TimingMeasurementState;
+}
+
 export interface ReportArtifact {
   type: ArtifactType;
   artifact_id: string;
   name?: string;
   status?: 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
   duration_ms?: number;
+  timing?: ArtifactTiming;
   error?: string;
   input_artifact_ids: string[];
   metadata: Record<string, unknown>;
